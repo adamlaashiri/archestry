@@ -18,21 +18,22 @@
 #include <optional>
 #include <utility>
 
+
 #if defined(_MSC_VER)
-	#define ARCH_FORCEINLINE __forceinline
+#define ARCH_FORCEINLINE __forceinline
 #elif defined(__GNUC__) || defined(__clang__)
-	#define ARCH_FORCEINLINE inline __attribute__((always_inline))
+#define ARCH_FORCEINLINE inline __attribute__((always_inline))
 #else
-	#define ARCH_FORCEINLINE inline
+#define ARCH_FORCEINLINE inline
 #endif
 
 
 #ifdef ARCHESTRY_DEBUG
-	#define ARCH_ASSERT(expr, msg) if (!(expr)) { std::cerr << "[archestry error] (" << __func__ << "): " << msg << '\n'; std::abort(); }
-	#define ARCH_MESSAGE(msg) std::cout << msg << '\n'
+#define ARCH_ASSERT(expr, msg) if (!(expr)) { std::cerr << "[archestry error] (" << __func__ << "): " << msg << '\n'; std::abort(); }
+#define ARCH_MESSAGE(msg) std::cout << msg << '\n'
 #else
-	#define ARCH_ASSERT(expr, msg) ((void)0)
-	#define ARCH_MESSAGE(msg) ((void)0)
+#define ARCH_ASSERT(expr, msg) ((void)0)
+#define ARCH_MESSAGE(msg) ((void)0)
 #endif
 
 
@@ -55,7 +56,7 @@ namespace archestry {
 
 
 	constexpr size_t MAX_COMPONENT_TYPE_COUNT = sizeof(Bitmask) * CHAR_BIT - 1;
-	constexpr size_t INIT_POOL_CAPACITY = 64;
+	constexpr size_t INIT_POOL_CAPACITY = 1;
 	
 
 	// First bit representing an entity's state
@@ -84,11 +85,6 @@ namespace archestry {
 	* and their associated metadata
 	*/
 	class ComponentRegistry {
-#pragma region Asserts
-#define ASSERT_VALID_MASK(mask) ARCH_ASSERT(s_Registry.find(mask) != s_Registry.end(), "Type with mask " << mask << " is not registered");
-#define ASSERT_COMPONENT_COUNT() ARCH_ASSERT(s_Counter <= MAX_COMPONENT_TYPE_COUNT, "Attempting to register more than " << MAX_COMPONENT_TYPE_COUNT << " components");
-#pragma endregion
-
 	public:
 		template<typename T>
 		static const Bitmask GetMask() {
@@ -98,31 +94,24 @@ namespace archestry {
 		}
 
 		static const ComponentInfo& GetInfo(Bitmask mask) {
-			ASSERT_VALID_MASK(mask);
+			ARCH_ASSERT(s_Registry.find(mask) != s_Registry.end(),
+				"Type with mask " << mask << " is not registered.");
 			return s_Registry[mask];
 		}
 	private:
-		friend class Registry;
-
 		inline static uint64_t s_Counter = 0;
 		inline static std::unordered_map<Bitmask, ComponentInfo> s_Registry;
 
 		template<typename T>
 		static const Bitmask RegisterType() {
-			ASSERT_COMPONENT_COUNT();
+			ARCH_ASSERT(s_Counter <= MAX_COMPONENT_TYPE_COUNT,
+				"Attempting to register more than " << MAX_COMPONENT_TYPE_COUNT << " components.");
 
 			/*
 			* The component pool requires at least one of the two copy methods
 			* to efficiently and safely resize its buffer and move components.
 			* Non-trivial types must be both moveable and destructible
 			*/
-
-			// Trivial != trivially copyable, having user defined copy/move constructors
-			// or destructors (including its members) means the type cannot be safely memcopied.
-			// Custom ordinary constructors have no affect on this.
-
-			// Trivial structures have no user defined constructors (any kind), destructor,
-			// or virtual functions (applies to all members recursively)
 
 			static_assert(
 				std::is_trivially_copyable_v<T> || std::is_nothrow_move_constructible_v<T>,
@@ -360,8 +349,6 @@ namespace archestry {
 			};
 
 			m_Capacity = newCapacity;
-
-			// Free old buffer and replace it with the new bigger one
 			m_Buffer = std::move(newBuffer);
 		}
 
@@ -461,7 +448,6 @@ namespace archestry {
 		*/
 		void* operator[](size_t index) {
 			ARCH_ASSERT(index < m_Size, "Index " << index << " out of range (" << m_Size << ")");
-
 			return m_Buffer[index * m_ComponentInfo.Size];
 		}
 	};
@@ -480,10 +466,6 @@ namespace archestry {
 	// - Validations happens upstream, no need to assert entity presence or component validity.
 	// - Mutations of entityToIndex only affect entities belonging to this archetype (Registry guarantees).
 	class Archetype {
-#pragma region Asserts
-#define ASSERT_POOLS_SYNCED() ARCH_ASSERT(ArePoolsSynced(), "Component pools out of sync.");
-#pragma endregion
-
 	private:
 		const Bitmask m_ArchetypeMask = 0;
 
@@ -509,7 +491,7 @@ namespace archestry {
 		void EnsureEntity(EntityID ID, Bitmask componentMask) {
 			if (m_PendingMask == 0) {
 				// New entity
-				ASSERT_POOLS_SYNCED();
+				AssertPoolsSynced();
 
 				m_PendingMask = m_ArchetypeMask;
 				m_LastAddedEntity = ID;
@@ -551,6 +533,10 @@ namespace archestry {
 					return false;
 
 			return true;
+		}
+
+		ARCH_FORCEINLINE void AssertPoolsSynced() const {
+			ARCH_ASSERT(ArePoolsSynced(), "Component pools out of sync.");
 		}
 
 		template<typename Component>
@@ -597,13 +583,13 @@ namespace archestry {
 
 		template<typename Component>
 		Component& Get(EntityID ID) {
-			ASSERT_POOLS_SYNCED();
+			AssertPoolsSynced();
 			return *static_cast<Component*>(GetPool<Component>()[m_EntityToIndex[ID]]);
 		}
 
 		template<typename ...Components>
 		std::tuple<Components&...> Multiple(EntityID ID) {
-			ASSERT_POOLS_SYNCED();
+			AssertPoolsSynced();
 			const size_t entityIndex = m_EntityToIndex[ID];
 
 			return std::tuple<Components&...>{
@@ -613,7 +599,7 @@ namespace archestry {
 
 		template<typename ...Components>
 		std::tuple<Components&...> First() {
-			ASSERT_POOLS_SYNCED();
+			AssertPoolsSynced();
 			return std::tuple<Components&...> {
 				*static_cast<Components*>(GetPool<Components>()[0])...
 			};
@@ -621,7 +607,7 @@ namespace archestry {
 
 		template<typename ...Components, typename Fn>
 		void ForEach(Fn&& fn) {
-			ASSERT_POOLS_SYNCED();
+			AssertPoolsSynced();
 
 			// Cache pool base pointers before iteration
 			// to avoid multiple pointer indirections
@@ -661,7 +647,7 @@ namespace archestry {
 		* components in this archetype.
 		*/
 		void Move(EntityID ID, Archetype& other) {
-			ASSERT_POOLS_SYNCED();
+			AssertPoolsSynced();
 
 			const size_t entityIndex = m_EntityToIndex[ID];
 
@@ -686,7 +672,7 @@ namespace archestry {
 		}
 
 		void Delete(EntityID ID) {
-			ASSERT_POOLS_SYNCED();
+			AssertPoolsSynced();
 
 			const size_t index = m_EntityToIndex.at(ID);
 
@@ -697,110 +683,19 @@ namespace archestry {
 		}
 
 		bool IsEmpty() const {
-			ASSERT_POOLS_SYNCED();
+			AssertPoolsSynced();
 			return m_Size == 0;
 		}
 
 		size_t GetSize() const {
-			ASSERT_POOLS_SYNCED();
+			AssertPoolsSynced();
 			return m_Size;
-		}
-	};
-
-
-	/*
-	* Provides self contained queries defined
-	* by the passed-in component parameter pack.
-	*/
-	template<typename ...Components>
-	class Query {
-#pragma region Asserts
-#define ASSERT_VALID_REGISTRY() ARCH_ASSERT(m_Registry != nullptr, "Invalid pointer to Registry");
-#pragma endregion
-
-	private:
-		Registry* m_Registry = nullptr;
-
-		inline static Bitmask s_ComponentMask = CombineComponents<Components...>();
-
-		Bitmask m_ExcludedComponentMask = 0;
-
-		// Target all archetypes that contain the specified components
-		// Exclude archetypes that contain components to be excluded
-		bool IsTarget(Bitmask mask) const {
-			if ((mask & s_ComponentMask) != s_ComponentMask ||
-				(mask & m_ExcludedComponentMask) > 0)
-				return false;
-
-			return true;
-		}
-
-	public:
-		Query(Registry* ecs) :
-			m_Registry(ecs) {
-		}
-
-		// Excludes archetypes that contain any of the
-		// components in the passed-in parameter pack.
-		template<typename ...Components>
-		Query& Without() {
-			m_ExcludedComponentMask |= CombineComponents<Components...>();
-			return *this;
-		}
-		
-		bool HasEntity(EntityID ID) const {
-			ASSERT_VALID_REGISTRY();
-			ARCH_ASSERT(m_Registry->IsValidEntity(ID),
-				"Entity with ID " << ID << " does not exist");
-
-			if (s_ComponentMask == 0)
-				return false;
-			
-			return m_Registry->template HasAllComponents<Components...>(ID) &&
-				((m_Registry->m_Entities[ID] & m_ExcludedComponentMask) == 0);
-		}
-
-		// Return the first found set of components
-		std::optional<std::tuple<Components&...>> GetFirst() {
-			ASSERT_VALID_REGISTRY();
-
-			if (s_ComponentMask == 0)
-				return std::nullopt;
-
-			for (auto& [mask, archetype] : m_Registry->m_Types) {
-				if (!IsTarget(mask))
-					continue;
-				return archetype.First<Components...>();
-			}
-
-			return std::nullopt;
-		}
-
-		template<typename Fn>
-		void ForEach(Fn&& fn) {
-			ASSERT_VALID_REGISTRY();
-
-			if (s_ComponentMask == 0)
-				return;
-
-			for (auto& [mask, archetype] : m_Registry->m_Types) {
-				if (!IsTarget(mask))
-					continue;
-
-				archetype.ForEach<Components...>(fn);
-			}
 		}
 	};
 
 
 	// Main orchestrator of the ECS
 	class Registry {
-#pragma region Asserts
-#define ASSERT_VALID_ENTITY(ID) ARCH_ASSERT(IsValidEntity(ID), "Entity with ID " << ID << " does not exist");
-#define ASSERT_VALID_ARCHETYPE(mask) ARCH_ASSERT(m_Types.find(mask) != m_Types.end(), "Attempting to access inactive archetype: " << mask);
-#define ASSERT_ENTITY_STATE_BIT_NOT_SET(mask) ARCH_ASSERT((mask & ACTIVE_ENTITY) == 0, "Entity state bit set.");
-#pragma endregion
-
 	private:
 		template<typename...>
 		friend class Query;
@@ -825,16 +720,15 @@ namespace archestry {
 		// Container for all archetypes.
 		std::unordered_map<Bitmask, Archetype> m_Types;
 
-		bool IsValidEntity(EntityID ID) const {
-			return ID != NULL_ENTITY &&
-				ID < m_MaxID &&
-				m_Entities[ID] != INACTIVE_ENTITY;
+		void AssertValidEntity(EntityID ID) const {
+			ARCH_ASSERT(ID != NULL_ENTITY, "NULL_Entity");
+			ARCH_ASSERT(ID < m_MaxID, "Entity with ID " << ID << " is invalid.");
+			ARCH_ASSERT(m_Entities[ID] != INACTIVE_ENTITY, "Entity with ID " << ID << " is inactive.");
 		}
 
 		// Returns (and creates if needed) the archetype for the given mask.
 		// Gatekeeper that guarantees valid archetype for given mask.
 		Archetype& EnsureArchetype(Bitmask mask) {
-			ASSERT_ENTITY_STATE_BIT_NOT_SET(mask);
 			return m_Types.try_emplace(mask, mask, m_EntityToIndex).first->second;
 		}
 
@@ -863,7 +757,7 @@ namespace archestry {
 		}
 
 		void DeleteEntity(EntityID ID) {
-			ASSERT_VALID_ENTITY(ID);
+			AssertValidEntity(ID);
 
 			Bitmask& entityMask = m_Entities[ID];
 			const Bitmask archMask = entityMask & ~ACTIVE_ENTITY;
@@ -880,7 +774,7 @@ namespace archestry {
 
 		template<typename Component, typename... Args>
 		Component& AddComponent(EntityID ID, Args&&... args) {
-			ASSERT_VALID_ENTITY(ID);
+			AssertValidEntity(ID);
 			ARCH_ASSERT(!HasComponent<Component>(ID),
 				"Entity already has the specified component.");
 
@@ -907,7 +801,7 @@ namespace archestry {
 
 		template<typename... Components>
 		std::tuple<Components&...> AddComponents(EntityID ID, Components&&... components) {
-			ASSERT_VALID_ENTITY(ID);
+			AssertValidEntity(ID);
 			ARCH_ASSERT(!HasAnyComponent<Components...>(ID),
 				"Entity already has atleast one of the specified components.");
 
@@ -939,7 +833,7 @@ namespace archestry {
 
 		template<typename... Components>
 		void RemoveComponents(EntityID ID) {
-			ASSERT_VALID_ENTITY(ID);
+			AssertValidEntity(ID);
 			ARCH_ASSERT(HasAllComponents<Components...>(ID),
 				"Entity must have all of the specified components.");
 
@@ -962,9 +856,9 @@ namespace archestry {
 
 		template<typename Component>
 		Component& GetComponent(EntityID ID) {
-			ASSERT_VALID_ENTITY(ID);
+			AssertValidEntity(ID);
 			ARCH_ASSERT(HasComponent<Component>(ID),
-				"Entity does not have the specified component");
+				"Entity does not have the specified component.");
 			Bitmask mask = m_Entities[ID] & ~ACTIVE_ENTITY;
 
 			return m_Types.at(mask).Get<Component>(ID);
@@ -972,9 +866,9 @@ namespace archestry {
 
 		template<typename... Components>
 		std::tuple<Components&...> GetComponents(EntityID ID) {
-			ASSERT_VALID_ENTITY(ID);
+			AssertValidEntity(ID);
 			ARCH_ASSERT(HasAllComponents<Components...>(ID),
-				"Entity does not have all the specicied components");
+				"Entity does not have all the specicied components.");
 			Bitmask mask = m_Entities[ID] & ~ACTIVE_ENTITY;
 
 			return m_Types.at(mask).Multiple<Components...>(ID);
@@ -982,7 +876,7 @@ namespace archestry {
 
 		template<typename Component>
 		bool HasComponent(EntityID ID) const {
-			ASSERT_VALID_ENTITY(ID);
+			AssertValidEntity(ID);
 			return m_Entities[ID] & ComponentRegistry::GetMask<Component>();
 		}
 
@@ -1015,6 +909,90 @@ namespace archestry {
 
 		size_t GetArchetypeCount() const {
 			return m_Types.size();
+		}
+	};
+
+
+	/*
+	* Provides self contained queries defined
+	* by the passed-in component parameter pack.
+	*/
+	template<typename ...Components>
+	class Query {
+	private:
+		Registry* m_Registry = nullptr;
+
+		inline static Bitmask s_ComponentMask = CombineComponents<Components...>();
+
+		Bitmask m_ExcludedComponentMask = 0;
+
+		// Target all archetypes that contain the specified components
+		// Exclude archetypes that contain components to be excluded
+		bool IsTarget(Bitmask mask) const {
+			if ((mask & s_ComponentMask) != s_ComponentMask ||
+				(mask & m_ExcludedComponentMask) > 0)
+				return false;
+
+			return true;
+		}
+
+		void AssertValidRegistry() const {
+			ARCH_ASSERT(m_Registry != nullptr, "Invalid pointer to Registry");
+		}
+
+	public:
+		Query(Registry* registry) :
+			m_Registry(registry) {
+		}
+
+		// Excludes archetypes that contain any of the
+		// components in the passed-in parameter pack.
+		template<typename ...Components>
+		Query& Without() {
+			m_ExcludedComponentMask |= CombineComponents<Components...>();
+			return *this;
+		}
+
+		bool HasEntity(EntityID ID) const {
+			AssertValidRegistry();
+			m_Registry->AssertValidEntity(ID);
+
+			if (s_ComponentMask == 0)
+				return false;
+
+			return m_Registry->template HasAllComponents<Components...>(ID) &&
+				((m_Registry->m_Entities[ID] & m_ExcludedComponentMask) == 0);
+		}
+
+		// Return the first found set of components
+		std::optional<std::tuple<Components&...>> GetFirst() {
+			AssertValidRegistry();
+
+			if (s_ComponentMask == 0)
+				return std::nullopt;
+
+			for (auto& [mask, archetype] : m_Registry->m_Types) {
+				if (!IsTarget(mask))
+					continue;
+				return archetype.First<Components...>();
+			}
+
+			return std::nullopt;
+		}
+
+		template<typename Fn>
+		void ForEach(Fn&& fn) {
+			AssertValidRegistry();
+
+			if (s_ComponentMask == 0)
+				return;
+
+			for (auto& [mask, archetype] : m_Registry->m_Types) {
+				if (!IsTarget(mask))
+					continue;
+
+				archetype.ForEach<Components...>(fn);
+			}
 		}
 	};
 }
