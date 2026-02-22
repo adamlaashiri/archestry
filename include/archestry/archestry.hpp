@@ -18,15 +18,25 @@
 #include <optional>
 #include <utility>
 
-namespace archestry {
+#if defined(_MSC_VER)
+	#define ARCH_FORCEINLINE __forceinline
+#elif defined(__GNUC__) || defined(__clang__)
+	#define ARCH_FORCEINLINE inline __attribute__((always_inline))
+#else
+	#define ARCH_FORCEINLINE inline
+#endif
+
 
 #ifdef ARCHESTRY_DEBUG
-#define ARCHESTRY_ASSERT(expr, msg) if (!(expr)) { std::cerr << "[archestry error] (" << __func__ << "): " << msg << '\n'; std::abort(); }
-#define ARCHESTRY_MESSAGE(msg) std::cout << msg << '\n';
+	#define ARCH_ASSERT(expr, msg) if (!(expr)) { std::cerr << "[archestry error] (" << __func__ << "): " << msg << '\n'; std::abort(); }
+	#define ARCH_MESSAGE(msg) std::cout << msg << '\n'
 #else
-#define ARCHESTRY_ASSERT(expr, msg) ((void)0)
-#define ARCHESTRY_MESSAGE(msg) ((void)0)
+	#define ARCH_ASSERT(expr, msg) ((void)0)
+	#define ARCH_MESSAGE(msg) ((void)0)
 #endif
+
+
+namespace archestry {
 
 	// An EntityID is just a number used
 	// to identify and group components
@@ -39,14 +49,16 @@ namespace archestry {
 	/*
 	* Each component has its unique bit.
 	* The first bit is reserved to represent the entity's state.
-	* A combination of component bitmasks form an archetype mask.
+	* A combination of component bits form an archetype mask.
 	*/
 	using Bitmask = uint64_t;
 
 
 	constexpr size_t MAX_COMPONENT_TYPE_COUNT = sizeof(Bitmask) * CHAR_BIT - 1;
 	constexpr size_t INIT_POOL_CAPACITY = 64;
+	
 
+	// First bit representing an entity's state
 	constexpr Bitmask INACTIVE_ENTITY = 0;
 	constexpr Bitmask ACTIVE_ENTITY = 1;
 
@@ -73,8 +85,8 @@ namespace archestry {
 	*/
 	class ComponentRegistry {
 #pragma region Asserts
-#define ASSERT_VALID_MASK(mask) ARCHESTRY_ASSERT(s_Registry.find(mask) != s_Registry.end(), "Type with mask " << mask << " is not registered");
-#define ASSERT_COMPONENT_COUNT() ARCHESTRY_ASSERT(s_Counter <= MAX_COMPONENT_TYPE_COUNT, "Attempting to register more than " << MAX_COMPONENT_TYPE_COUNT << " components");
+#define ASSERT_VALID_MASK(mask) ARCH_ASSERT(s_Registry.find(mask) != s_Registry.end(), "Type with mask " << mask << " is not registered");
+#define ASSERT_COMPONENT_COUNT() ARCH_ASSERT(s_Counter <= MAX_COMPONENT_TYPE_COUNT, "Attempting to register more than " << MAX_COMPONENT_TYPE_COUNT << " components");
 #pragma endregion
 
 	public:
@@ -144,18 +156,8 @@ namespace archestry {
 		}
 
 		template<typename T>
-		static void CopyConstruct(void* dst, void* src) {
-			new (dst) T(*static_cast<T*>(src));
-		}
-
-		template<typename T>
 		static void MoveConstruct(void* dst, void* src) {
 			new (dst) T(std::move(*static_cast<T*>(src)));
-		}
-
-		template<typename T>
-		static void CopyAssign(void* dst, void* src) {
-			*static_cast<T*>(dst) = *static_cast<T*>(src);
 		}
 
 		template<typename T>
@@ -184,7 +186,7 @@ namespace archestry {
 		}
 
 		Bitmask Next() {
-			ARCHESTRY_ASSERT(Mask > 0, "Iterator Mask is 0");
+			ARCH_ASSERT(Mask > 0, "Iterator Mask is 0");
 			// Get next set least significant bit
 			const Bitmask bit = Mask & -Mask;
 			// Clear last bit to get to the next set bit
@@ -194,12 +196,9 @@ namespace archestry {
 	};
 
 
-	/*
-	* Utillity to deterministically
-	* convert a single component bitmask to an index
-	*/
+	// Utillity to convert a single bit component mask to an index
 	constexpr size_t ComponentIndex(Bitmask mask) {
-		ARCHESTRY_ASSERT(std::popcount(mask) == 1, "Not a single bit mask");
+		ARCH_ASSERT(std::popcount(mask) == 1, "Not a single bit mask");
 		return std::countr_zero(mask) - 1;
 	}
 
@@ -217,7 +216,7 @@ namespace archestry {
 	*/
 	class ComponentPool {
 #pragma region Asserts
-#define	ASSERT_INVALID_COPY_TYPE() ARCHESTRY_ASSERT(false, "Copy type not supported");
+#define	ASSERT_INVALID_COPY_TYPE() ARCH_ASSERT(false, "Copy type not supported");
 #pragma endregion
 
 	private:
@@ -238,7 +237,7 @@ namespace archestry {
 			Buffer() = delete;
 
 			Buffer(size_t size, size_t alignment) {
-				ARCHESTRY_ASSERT(alignment != 0 && (alignment & (~alignment)) == 0,
+				ARCH_ASSERT(alignment != 0 && (alignment & (~alignment)) == 0,
 					"Alignment must be non-zero and a power of 2");
 
 				m_pBase = std::malloc(size + alignment - 1);
@@ -331,8 +330,7 @@ namespace archestry {
 			Buffer newBuffer(newCapacity * m_ComponentInfo.Size, m_ComponentInfo.Alignment);
 
 			switch (m_CopyType) {
-			case CopyType::Memcpy:
-			{
+			case CopyType::Memcpy: {
 				/*
 				* Copy all components from the start of the current buffer
 				* to the start of the new buffer.
@@ -342,8 +340,7 @@ namespace archestry {
 				memcpy(dst, src, m_Size * m_ComponentInfo.Size);
 				break;
 			}
-			case CopyType::Move:
-			{
+			case CopyType::Move: {
 				/*
 				* Invoke the move constructor for each element and move it
 				* to its corresponding index in the new buffer.
@@ -463,7 +460,7 @@ namespace archestry {
 		* each occupying ComponentInfo.Size bytes
 		*/
 		void* operator[](size_t index) {
-			ARCHESTRY_ASSERT(index < m_Size, "Index " << index << " out of range (" << m_Size << ")");
+			ARCH_ASSERT(index < m_Size, "Index " << index << " out of range (" << m_Size << ")");
 
 			return m_Buffer[index * m_ComponentInfo.Size];
 		}
@@ -484,7 +481,7 @@ namespace archestry {
 	// - Mutations of entityToIndex only affect entities belonging to this archetype (Registry guarantees).
 	class Archetype {
 #pragma region Asserts
-#define ASSERT_POOLS_SYNCED() ARCHESTRY_ASSERT(ArePoolsSynced(), "Component pools out of sync.");
+#define ASSERT_POOLS_SYNCED() ARCH_ASSERT(ArePoolsSynced(), "Component pools out of sync.");
 #pragma endregion
 
 	private:
@@ -556,13 +553,8 @@ namespace archestry {
 			return true;
 		}
 
-		// Centralize and abstract,
-		// design pattern for a single source of truth
-		// for pool index derivation and caching,
-		// reduce duplications, scales well,
-		// cleaner code at call sites
 		template<typename Component>
-		__forceinline ComponentPool& GetPool() {
+		ARCH_FORCEINLINE ComponentPool& GetPool() {
 			static const auto index = ComponentIndex(
 				ComponentRegistry::GetMask<Component>());
 			return *m_Pools[index];
@@ -654,7 +646,7 @@ namespace archestry {
 						fn(ptrs[i]...);
 				}
 				else
-					ARCHESTRY_ASSERT(false,
+					ARCH_ASSERT(false,
 						"Bad lambda provided to .ForEach, parameter pack does not match lambda args."
 					);
 
@@ -685,7 +677,7 @@ namespace archestry {
 				m_Pools[componentIndex]->Delete(entityIndex);
 			}
 
-			ARCHESTRY_ASSERT(other.ArePoolsSynced(),
+			ARCH_ASSERT(other.ArePoolsSynced(),
 				"Other archetype component pools out of sync.");
 
 			// m_EntityToIndex[ID] now reflects the other archetype
@@ -723,7 +715,7 @@ namespace archestry {
 	template<typename ...Components>
 	class Query {
 #pragma region Asserts
-#define ASSERT_VALID_REGISTRY() ARCHESTRY_ASSERT(m_Registry != nullptr, "Invalid pointer to Registry");
+#define ASSERT_VALID_REGISTRY() ARCH_ASSERT(m_Registry != nullptr, "Invalid pointer to Registry");
 #pragma endregion
 
 	private:
@@ -755,14 +747,17 @@ namespace archestry {
 			m_ExcludedComponentMask |= CombineComponents<Components...>();
 			return *this;
 		}
-
-		bool HasEntity(const EntityID id) const {
+		
+		bool HasEntity(EntityID ID) const {
 			ASSERT_VALID_REGISTRY();
+			ARCH_ASSERT(m_Registry->IsValidEntity(ID),
+				"Entity with ID " << ID << " does not exist");
 
 			if (s_ComponentMask == 0)
 				return false;
-
-			return false;
+			
+			return m_Registry->template HasAllComponents<Components...>(ID) &&
+				((m_Registry->m_Entities[ID] & m_ExcludedComponentMask) == 0);
 		}
 
 		// Return the first found set of components
@@ -791,22 +786,19 @@ namespace archestry {
 			for (auto& [mask, archetype] : m_Registry->m_Types) {
 				if (!IsTarget(mask))
 					continue;
+
 				archetype.ForEach<Components...>(fn);
 			}
 		}
 	};
 
 
-	// The main orchestrator of the ECS
+	// Main orchestrator of the ECS
 	class Registry {
 #pragma region Asserts
-#define ASSERT_VALID_ENTITY(ID) \
-			do { \
-				ARCHESTRY_ASSERT(ID != NULL_ENTITY, "NULL_ENTITY"); \
-				ARCHESTRY_ASSERT(ID < m_MaxID && m_Entities[ID] != INACTIVE_ENTITY, "Entity with ID " << ID << " does not exist"); \
-			} while (false)
-#define ASSERT_VALID_ARCHETYPE(mask) ARCHESTRY_ASSERT(m_Types.find(mask) != m_Types.end(), "Attempting to access inactive archetype: " << mask);
-#define ASSERT_ENTITY_STATE_BIT_NOT_SET(mask) ARCHESTRY_ASSERT((mask & ACTIVE_ENTITY) == 0, "Entity state bit set.");
+#define ASSERT_VALID_ENTITY(ID) ARCH_ASSERT(IsValidEntity(ID), "Entity with ID " << ID << " does not exist");
+#define ASSERT_VALID_ARCHETYPE(mask) ARCH_ASSERT(m_Types.find(mask) != m_Types.end(), "Attempting to access inactive archetype: " << mask);
+#define ASSERT_ENTITY_STATE_BIT_NOT_SET(mask) ARCH_ASSERT((mask & ACTIVE_ENTITY) == 0, "Entity state bit set.");
 #pragma endregion
 
 	private:
@@ -815,10 +807,12 @@ namespace archestry {
 
 		EntityID m_MaxID = 0;
 
-		// The entityMask encodes which archetype
-		// an entity belongs to, based on its combination of components.
-		// The first bit is reserved for storing the entity's state
-		// and is ignored when querying archetypes.
+		/*
+		* The entityMask encodes which archetype
+		* an entity belongs to, based on its combination of components.
+		* The first bit is reserved for storing the entity's state
+		* and is ignored when querying archetypes.
+		*/
 		std::vector<Bitmask> m_Entities;
 
 		// Stores IDs of deleted entities for later reuse.
@@ -829,8 +823,13 @@ namespace archestry {
 		std::vector<size_t> m_EntityToIndex;
 
 		// Container for all archetypes.
-		// The archetypeMask encodes all components that belong to its archetype.
 		std::unordered_map<Bitmask, Archetype> m_Types;
+
+		bool IsValidEntity(EntityID ID) const {
+			return ID != NULL_ENTITY &&
+				ID < m_MaxID &&
+				m_Entities[ID] != INACTIVE_ENTITY;
+		}
 
 		// Returns (and creates if needed) the archetype for the given mask.
 		// Gatekeeper that guarantees valid archetype for given mask.
@@ -865,6 +864,7 @@ namespace archestry {
 
 		void DeleteEntity(EntityID ID) {
 			ASSERT_VALID_ENTITY(ID);
+
 			Bitmask& entityMask = m_Entities[ID];
 			const Bitmask archMask = entityMask & ~ACTIVE_ENTITY;
 
@@ -881,7 +881,7 @@ namespace archestry {
 		template<typename Component, typename... Args>
 		Component& AddComponent(EntityID ID, Args&&... args) {
 			ASSERT_VALID_ENTITY(ID);
-			ARCHESTRY_ASSERT(!HasComponent<Component>(ID),
+			ARCH_ASSERT(!HasComponent<Component>(ID),
 				"Entity already has the specified component.");
 
 			Bitmask& entityMask = m_Entities[ID];
@@ -908,7 +908,7 @@ namespace archestry {
 		template<typename... Components>
 		std::tuple<Components&...> AddComponents(EntityID ID, Components&&... components) {
 			ASSERT_VALID_ENTITY(ID);
-			ARCHESTRY_ASSERT(!HasAnyComponent<Components...>(ID),
+			ARCH_ASSERT(!HasAnyComponent<Components...>(ID),
 				"Entity already has atleast one of the specified components.");
 
 			Bitmask& entityMask = m_Entities.at(ID);
@@ -940,7 +940,7 @@ namespace archestry {
 		template<typename... Components>
 		void RemoveComponents(EntityID ID) {
 			ASSERT_VALID_ENTITY(ID);
-			ARCHESTRY_ASSERT(HasAllComponents<Components...>(ID),
+			ARCH_ASSERT(HasAllComponents<Components...>(ID),
 				"Entity must have all of the specified components.");
 
 			Bitmask& entityMask = m_Entities[ID];
@@ -963,7 +963,7 @@ namespace archestry {
 		template<typename Component>
 		Component& GetComponent(EntityID ID) {
 			ASSERT_VALID_ENTITY(ID);
-			ARCHESTRY_ASSERT(HasComponent<Component>(ID),
+			ARCH_ASSERT(HasComponent<Component>(ID),
 				"Entity does not have the specified component");
 			Bitmask mask = m_Entities[ID] & ~ACTIVE_ENTITY;
 
@@ -973,7 +973,7 @@ namespace archestry {
 		template<typename... Components>
 		std::tuple<Components&...> GetComponents(EntityID ID) {
 			ASSERT_VALID_ENTITY(ID);
-			ARCHESTRY_ASSERT(HasAllComponents<Components...>(ID),
+			ARCH_ASSERT(HasAllComponents<Components...>(ID),
 				"Entity does not have all the specicied components");
 			Bitmask mask = m_Entities[ID] & ~ACTIVE_ENTITY;
 
