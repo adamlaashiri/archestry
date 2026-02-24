@@ -191,7 +191,7 @@ namespace archestry {
 
 
 	// Utillity to convert a single bit component mask to an index
-	constexpr size_t ComponentIndex(Bitmask mask) {
+	inline size_t ComponentIndex(Bitmask mask) {
 		ARCH_ASSERT(std::popcount(mask) == 1, "Not a single bit mask");
 		return std::countr_zero(mask) - 1;
 	}
@@ -199,7 +199,7 @@ namespace archestry {
 
 	// Utillity to combine multiple component bits into one mask
 	template<typename ...Components>
-	constexpr Bitmask CombineComponents() {
+	Bitmask CombineComponents() {
 		return (ComponentRegistry::GetMask<Components>() | ... | 0);
 	}
 
