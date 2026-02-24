@@ -69,103 +69,6 @@ namespace archestry {
 	using DestructFn = void(*)(void* src);
 
 
-	// Stores component metadata
-	struct ComponentInfo {
-		size_t Size;
-		size_t Alignment;
-		bool IsTrivial;
-		ConstructFn MoveCtor;
-		AssignFn MoveAssign;
-		DestructFn Destruct;
-	};
-
-
-	/*
-	* Handles registration and management of component types
-	* and their associated metadata
-	*/
-	class ComponentRegistry {
-	public:
-		template<typename Component>
-		static const Bitmask GetMask() {
-			// Cache mask once
-			static const Bitmask mask = RegisterType<Component>();
-			return mask;
-		}
-
-		static const ComponentInfo& GetInfo(Bitmask mask) {
-			ARCH_ASSERT(s_Registry.find(mask) != s_Registry.end(),
-				"Type with mask " << mask << " is not registered.");
-			return s_Registry.at(mask);
-		}
-	private:
-		inline static uint64_t s_Counter = 0;
-		inline static std::unordered_map<Bitmask, ComponentInfo> s_Registry;
-
-		template<typename Component>
-		static const Bitmask RegisterType() {
-			ARCH_ASSERT(s_Counter <= MAX_COMPONENT_TYPE_COUNT,
-				"Attempting to register more than " << MAX_COMPONENT_TYPE_COUNT << " components.");
-
-			static_assert(!std::is_void_v<Component>, "Component type cannot be void.");
-
-			/*
-			* The component pool requires at least one of the two copy methods
-			* to efficiently and safely resize its buffer and move components.
-			* Non-trivial types must be both moveable and destructible
-			*/
-
-			static_assert(
-				std::is_trivially_copyable_v<Component> || std::is_nothrow_move_constructible_v<Component>,
-				"Component must be trivially copyable or have a non-throwing move constructor"
-				);
-
-			if constexpr (!std::is_trivially_copyable_v<Component>) {
-				static_assert(std::is_nothrow_destructible_v<Component>,
-					"Non-trivial component must be non-throwing destructible");
-
-				static_assert(std::is_nothrow_move_assignable_v<Component>,
-					"Non-trivial component must be non-throwing move assignable");
-			}
-
-			// We bitshift from 2, because the first bit is reserved for the state of an entity
-			Bitmask mask = 2ULL << s_Counter++;
-
-			s_Registry.try_emplace(
-				mask,
-				sizeof(Component),
-				alignof(Component),
-				std::is_trivially_copyable_v<Component>,
-				!std::is_trivially_copyable_v<Component> ? &MoveConstruct<Component> : nullptr,
-				!std::is_trivially_copyable_v<Component> ? &MoveAssign<Component> : nullptr,
-				!std::is_trivially_copyable_v<Component> ? &Destruct<Component> : nullptr
-			);
-
-			return mask;
-		}
-
-		template<typename Component>
-		static void Construct(void* dst, const void* src) {
-			new (dst) Component(*static_cast<Component*>(src));
-		}
-
-		template<typename Component>
-		static void MoveConstruct(void* dst, void* src) {
-			new (dst) Component(std::move(*static_cast<Component*>(src)));
-		}
-
-		template<typename Component>
-		static void MoveAssign(void* dst, void* src) {
-			*static_cast<Component*>(dst) = std::move(*static_cast<Component*>(src));
-		}
-
-		template<typename Component>
-		static void Destruct(void* src) {
-			static_cast<Component*>(src)->~Component();
-		}
-	};
-
-
 	/*
 	* Iterates over the set bits in a bitmask
 	* (e.g., component bits in an archetype)
@@ -195,6 +98,99 @@ namespace archestry {
 		ARCH_ASSERT(std::popcount(mask) == 1, "Not a single bit mask");
 		return std::countr_zero(mask) - 1;
 	}
+
+
+	// Stores component metadata
+	struct ComponentInfo {
+		size_t Size;
+		size_t Alignment;
+		bool IsTrivial;
+		ConstructFn MoveCtor;
+		AssignFn MoveAssign;
+		DestructFn Destruct;
+	};
+
+
+	/*
+	* Handles registration and management of component types
+	* and their associated metadata
+	*/
+	class ComponentRegistry {
+	public:
+		template<typename Component>
+		static const Bitmask GetMask() {
+			// Cache mask once
+			static const Bitmask mask = RegisterType<Component>();
+			return mask;
+		}
+
+		static const ComponentInfo& GetInfo(Bitmask mask) {
+			ARCH_ASSERT(ComponentIndex(mask) < s_Counter,
+				"Component with mask " << mask << " is not registered.");
+			return s_Components[ComponentIndex(mask)];
+		}
+	private:
+		inline static uint64_t s_Counter = 0;
+		inline static std::vector<ComponentInfo> s_Components;
+
+		template<typename Component>
+		static const Bitmask RegisterType() {
+			ARCH_ASSERT(s_Counter < MAX_COMPONENT_TYPE_COUNT,
+				"Attempting to register more than " << MAX_COMPONENT_TYPE_COUNT << " components.");
+
+			static_assert(!std::is_void_v<Component>, "Component type cannot be void.");
+
+			/*
+			* The component pool requires at least one of the two copy methods
+			* to efficiently and safely resize its buffer and move components.
+			* Non-trivial types must be both moveable and destructible
+			*/
+
+			constexpr bool isTrivialCopy = std::is_trivially_copyable_v<Component>;
+
+			static_assert(isTrivialCopy || std::is_nothrow_move_constructible_v<Component>,
+				"Component must be trivially copyable or have a non-throwing move constructor");
+
+			if constexpr (!isTrivialCopy) {
+				static_assert(std::is_nothrow_destructible_v<Component>,
+					"Non-trivial component must be non-throwing destructible");
+
+				static_assert(std::is_nothrow_move_assignable_v<Component>,
+					"Non-trivial component must be non-throwing move assignable");
+			}
+
+			// First bit is reserved for the state of an entity, thus 2ULL
+			const size_t index = s_Counter++;
+			const Bitmask mask = 2ULL << index;
+
+			s_Components.emplace_back(
+				sizeof(Component),
+				alignof(Component),
+				isTrivialCopy,
+				!isTrivialCopy ? &MoveConstruct<Component> : nullptr,
+				!isTrivialCopy ? &MoveAssign<Component> : nullptr,
+				!isTrivialCopy ? &Destruct<Component> : nullptr
+
+			);
+
+			return mask;
+		}
+
+		template<typename Component>
+		static void MoveConstruct(void* dst, void* src) {
+			new (dst) Component(std::move(*static_cast<Component*>(src)));
+		}
+
+		template<typename Component>
+		static void MoveAssign(void* dst, void* src) {
+			*static_cast<Component*>(dst) = std::move(*static_cast<Component*>(src));
+		}
+
+		template<typename Component>
+		static void Destruct(void* src) {
+			static_cast<Component*>(src)->~Component();
+		}
+	};
 
 
 	// Utillity to combine multiple component bits into one mask
