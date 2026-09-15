@@ -29,7 +29,7 @@
 
 
 #ifdef ARCHESTRY_DEBUG
-#define ARCH_ASSERT(expr, msg) if (!(expr)) { std::cerr << "[archestry error] (" << __func__ << "): " << (msg) << '\n'; std::abort(); }
+#define ARCH_ASSERT(expr, msg) if (!(expr)) { std::cerr << "[archestry error] (" << __func__ << "): " << msg << '\n'; std::abort(); }
 #define ARCH_MESSAGE(msg) std::cout << (msg) << '\n'
 #else
 #define ARCH_ASSERT(expr, msg) ((void)0)
@@ -440,8 +440,6 @@ namespace archestry {
 	};
 
 	// Groups entities with the same set of components together.
-		// entityToIndex[entity] -> index in component pool(s)
-		// indexToEntity[index] -> entity at index in component pool(s)
 		// Invariants:
 		// - Registry outlives Archetype.
 		// - All component pools have the same length.
@@ -461,60 +459,33 @@ namespace archestry {
 
 		size_t m_Size = 0;
 
-		// Bidirectionl lookup between entity and index.
+		/*
+		* entityToIndex[entity] -> index in component pool(s).
+		* indexToEntity[index] -> entity at index in component pool(s)
+		*/
 		std::vector<EntityID> m_IndexToEntity;
 		std::vector<size_t>& m_EntityToIndex;
 
-		// Sparse array for O(1) lookup.
 		// Scales with max component type count.
 		std::array<std::unique_ptr<ComponentPool>, MAX_COMPONENT_TYPE_COUNT> m_Pools;
 
-		/*
-		* Registers a new entity exactly once.
-		* Following Emplace/Add calls attach components to the same entity.
-		* EntityToIndex is updated only after finalization, preserving indices
-		* during archetype migration.
-		*/
-		void PrepareEntity(EntityID ID, Bitmask componentMask) {
-			// New entity
+		// Registers the entity once and tracks its components as they are added.
+		void EnsureEntity(EntityID ID, Bitmask componentMask) {
 			if (m_PendingMask == 0) {
-				AssertPoolsSynced();
-				m_PendingMask = m_ArchetypeMask;
+				AssertSyncedPools();
 				m_LastAddedEntity = ID;
+				m_PendingMask = m_ArchetypeMask;
+				m_EntityToIndex[ID] = m_Size++;
+				m_IndexToEntity.push_back(ID);
+				
 			}
 
 			ARCH_ASSERT(ID == m_LastAddedEntity,
 				"Different entity ID.");
 
 			m_PendingMask &= ~componentMask;
-
-			if (m_PendingMask == 0) {
-				// Entity migration finalized
-				m_IndexToEntity.push_back(ID);
-				m_EntityToIndex[ID] = m_Size++;
-			}
 		}
 
-		void UpdateRemovedIndex(size_t index) {
-			/*
-			* Entity was already last in the pool; no replacement performed.
-			* ComponentPool index mapping remains valid, no reassignment of index required.
-			*/
-			if (index == m_Size - 1) {
-				m_IndexToEntity.pop_back();
-				m_Size--;
-				return;
-			}
-
-			// Replacement occured, update last entity to deleted entity index.
-			EntityID lastEntityID = m_IndexToEntity[m_Size - 1];
-			m_EntityToIndex[lastEntityID] = index;
-			m_IndexToEntity[index] = lastEntityID;
-			m_IndexToEntity.pop_back();
-			m_Size--;
-		}
-
-		// For debugging, Check that all Pools lengths match
 		bool ArePoolsSynced() const {
 			for (BitmaskIterator it{ m_ArchetypeMask }; it.HasNext();)
 				if (m_Size != m_Pools[ComponentIndex(it.Next())]->GetSize())
@@ -523,7 +494,7 @@ namespace archestry {
 			return true;
 		}
 
-		ARCH_FORCEINLINE void AssertPoolsSynced() const {
+		ARCH_FORCEINLINE void AssertSyncedPools() const {
 			ARCH_ASSERT(ArePoolsSynced(), "Component pools out of sync.");
 		}
 
@@ -552,45 +523,39 @@ namespace archestry {
 		}
 
 		Archetype(const Archetype& other) = delete;
-
 		Archetype& operator=(const Archetype& other) = delete;
 
 		template<typename Component, typename... Args>
 		Component& Emplace(EntityID ID, Args&&... args) noexcept {
-			PrepareEntity(ID, ComponentRegistry::GetMask<Component>());
+			EnsureEntity(ID, ComponentRegistry::GetMask<Component>());
 			return GetPool<Component>().Emplace<Component>(std::forward<Args>(args)...);
 		}
 
 		template<typename ...Components>
-		std::tuple<Components&...> AddMultiple(
-			EntityID ID,
-			Components&&... components
-		) {
-			PrepareEntity(ID, CombineComponents<Components...>());
+		std::tuple<Components&...> AddMultiple(EntityID ID, Components&&... components) {
+			EnsureEntity(ID, CombineComponents<Components...>());
 			return std::tuple<Components&...> {
 				*static_cast<Components*>(GetPool<Components>().Add(&components))...
 			};
 		}
 
 		template<typename Component>
-		Component& Get(EntityID ID) {
-			AssertPoolsSynced();
-			return *static_cast<Component*>(GetPool<Component>()[m_EntityToIndex[ID]]);
+		Component& Get(size_t index) {
+			AssertSyncedPools();
+			return *static_cast<Component*>(GetPool<Component>()[index]);
 		}
 
 		template<typename ...Components>
-		std::tuple<Components&...> GetMultiple(EntityID ID) {
-			AssertPoolsSynced();
-			const size_t entityIndex = m_EntityToIndex[ID];
-
+		std::tuple<Components&...> GetMultiple(size_t index) {
+			AssertSyncedPools();
 			return std::tuple<Components&...>{
-				*static_cast<Components*>(GetPool<Components>()[entityIndex])...
+				*static_cast<Components*>(GetPool<Components>()[index])...
 			};
 		}
 
 		template<typename ...Components>
 		std::tuple<Components&...> First() {
-			AssertPoolsSynced();
+			AssertSyncedPools();
 			return std::tuple<Components&...> {
 				*static_cast<Components*>(GetPool<Components>()[0])...
 			};
@@ -598,7 +563,7 @@ namespace archestry {
 
 		template<typename ...Components, typename Fn>
 		void ForEach(Fn&& fn) {
-			AssertPoolsSynced();
+			AssertSyncedPools();
 
 			// Cache pool base pointers before iteration
 			// to avoid multiple pointer indirections
@@ -635,10 +600,11 @@ namespace archestry {
 		* Move every relevant component belonging
 		* to given entity, to the other archetype,
 		* and delete entity and all its existing
-		* components in this archetype.
+		* components in current archetype.
 		*/
 		void Move(EntityID ID, Archetype& other) {
-			AssertPoolsSynced();
+			AssertSyncedPools();
+			other.AssertSyncedPools();
 
 			const size_t entityIndex = m_EntityToIndex[ID];
 
@@ -647,37 +613,45 @@ namespace archestry {
 				const size_t componentIndex = ComponentIndex(componentMask);
 
 				if (other.m_ArchetypeMask & componentMask) {
-					other.PrepareEntity(ID, componentMask);
+					other.EnsureEntity(ID, componentMask);
 					other.m_Pools[componentIndex]->Add((*m_Pools[componentIndex])[entityIndex]);
 				}
-
-				m_Pools[componentIndex]->Delete(entityIndex);
 			}
 
-			ARCH_ASSERT(other.ArePoolsSynced(),
-				"Other archetype component pools out of sync.");
-
-			UpdateRemovedIndex(entityIndex);
+			Delete(entityIndex);
 		}
 
-		void Delete(EntityID ID) {
-			AssertPoolsSynced();
-
-			const size_t index = m_EntityToIndex[ID];
+		void Delete(size_t index) {
+			AssertSyncedPools();
 
 			for (BitmaskIterator it{ m_ArchetypeMask }; it.HasNext();)
 				m_Pools.at(ComponentIndex(it.Next()))->Delete(index);
 
-			UpdateRemovedIndex(index);
+			/*
+			* Entity was already last in the pool; no replacement performed.
+			* ComponentPool index mapping remains valid, no reassignment of index required.
+			*/
+			if (index == m_Size - 1) {
+				m_IndexToEntity.pop_back();
+				m_Size--;
+				return;
+			}
+
+			// Replacement occured, update last entity to deleted entity index.
+			EntityID lastEntityID = m_IndexToEntity[m_Size - 1];
+			m_EntityToIndex[lastEntityID] = index;
+			m_IndexToEntity[index] = lastEntityID;
+			m_IndexToEntity.pop_back();
+			m_Size--;
 		}
 
 		bool IsEmpty() const {
-			AssertPoolsSynced();
+			AssertSyncedPools();
 			return m_Size == 0;
 		}
 
 		size_t GetSize() const {
-			AssertPoolsSynced();
+			AssertSyncedPools();
 			return m_Size;
 		}
 	};
@@ -722,7 +696,7 @@ namespace archestry {
 		* Gatekeeper that returns (and creates if needed)
 		* the archetype for the given mask.
 		*/
-		Archetype& EnsureArchetype(Bitmask mask) {
+		Archetype& GetOrCreateArchetype(Bitmask mask) {
 			return m_Types.try_emplace(mask, mask, m_EntityToIndex).first->second;
 		}
 
@@ -759,7 +733,7 @@ namespace archestry {
 			// Destroy associated components
 			if (archMask) {
 				auto& arch = m_Types.at(archMask);
-				arch.Delete(ID);
+				arch.Delete(m_EntityToIndex[ID]);
 				DestroyArchetypeIfEmpty(archMask, arch);
 			}
 			entityMask = INACTIVE_ENTITY;
@@ -775,29 +749,25 @@ namespace archestry {
 			Bitmask& entityMask = m_Entities[ID];
 			const Bitmask componentMask = ComponentRegistry::GetMask<Component>();
 			const Bitmask oldArchMask = entityMask & ~ACTIVE_ENTITY;
-			const Bitmask newArchMask = oldArchMask | componentMask;
-
-			auto& newArch = EnsureArchetype(newArchMask);
-			Component& component = newArch.Emplace<Component>(ID, std::forward<Args>(args)...);
+			auto& newArch = GetOrCreateArchetype(oldArchMask | componentMask);
 
 			if (oldArchMask) {
-				// Move entity and its remaining components to the new archetype.
+				// Move entity components to the new archetype.
 				auto& oldArch = m_Types.at(oldArchMask);
 				oldArch.Move(ID, newArch);
 				DestroyArchetypeIfEmpty(oldArchMask, oldArch);
 			}
 
+			Component& addedComponent = newArch.Emplace<Component>(ID, std::forward<Args>(args)...);
+
 			// Update entity mask to reflect the change (added component)
 			entityMask |= componentMask;
 
-			return component;
+			return addedComponent;
 		}
 
 		template<typename... Components>
-		std::tuple<Components&...> AddComponents(
-			EntityID ID,
-			Components&&... components
-		) {
+		std::tuple<Components&...> AddComponents(EntityID ID, Components&&... components) {
 			AssertValidEntity(ID);
 			ARCH_ASSERT(!HasAnyComponent<Components...>(ID),
 				"Entity already has atleast one of the specified components.");
@@ -805,12 +775,7 @@ namespace archestry {
 			Bitmask& entityMask = m_Entities.at(ID);
 			const Bitmask componentMask = CombineComponents<Components...>();
 			const Bitmask oldArchMask = entityMask & ~ACTIVE_ENTITY;
-			const Bitmask newArchMask = oldArchMask | componentMask;
-
-			auto& newArch = EnsureArchetype(oldArchMask | componentMask);
-			auto componentPack = newArch.AddMultiple<Components...>(
-				ID, std::forward<Components>(components)...
-			);
+			auto& newArch = GetOrCreateArchetype(oldArchMask | componentMask);
 
 			if (oldArchMask) {
 				auto& oldArch = m_Types.at(oldArchMask);
@@ -818,9 +783,13 @@ namespace archestry {
 				DestroyArchetypeIfEmpty(oldArchMask, oldArch);
 			}
 
+			auto addedComponents = newArch.AddMultiple<Components...>(
+				ID, std::forward<Components>(components)...
+			);
+
 			entityMask |= componentMask;
 
-			return componentPack;
+			return addedComponents;
 		}
 
 		template<typename Component>
@@ -842,9 +811,9 @@ namespace archestry {
 			auto& oldArch = m_Types.at(oldArchMask);
 
 			if (newArchMask)
-				oldArch.Move(ID, EnsureArchetype(newArchMask));
+				oldArch.Move(ID, GetOrCreateArchetype(newArchMask));
 			else
-				oldArch.Delete(ID);
+				oldArch.Delete(m_EntityToIndex[ID]);
 
 			DestroyArchetypeIfEmpty(oldArchMask, oldArch);
 
@@ -858,7 +827,7 @@ namespace archestry {
 				"Entity does not have the specified component.");
 			Bitmask mask = m_Entities[ID] & ~ACTIVE_ENTITY;
 
-			return m_Types.at(mask).Get<Component>(ID);
+			return m_Types.at(mask).Get<Component>(m_EntityToIndex[ID]);
 		}
 
 		template<typename... Components>
@@ -867,8 +836,8 @@ namespace archestry {
 			ARCH_ASSERT(HasAllComponents<Components...>(ID),
 				"Entity does not have all the specicied components.");
 			Bitmask mask = m_Entities[ID] & ~ACTIVE_ENTITY;
-
-			return m_Types.at(mask).GetMultiple<Components...>(ID);
+			
+			return m_Types.at(mask).GetMultiple<Components...>(m_EntityToIndex[ID]);
 		}
 
 		template<typename Component>
