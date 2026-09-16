@@ -68,6 +68,27 @@ namespace archestry {
 	using AssignFn = void(*)(void* dst, void* src);
 	using DestructFn = void(*)(void* src);
 
+	class Archetype;
+	struct EntityMeta {
+		/*
+		* The entityMask encodes which archetype
+		* an entity belongs to, based on its combination of components.
+		* The first bit is reserved for storing the entity's state
+		* and is ignored when querying archetypes.
+		*/
+		Bitmask Mask = ACTIVE_ENTITY;
+
+		Archetype* Archetype = nullptr;
+
+		/*
+		* O(1) entity -> index lookup.
+		* Scales with max entity ID.
+		* Registry owns this vector,
+		* archetypes reference it for fast lookups.
+		*/
+		size_t Index = 0;
+	};
+
 
 	/*
 	* Iterates over the set bits in a bitmask
@@ -93,7 +114,10 @@ namespace archestry {
 	};
 
 
-	// Utillity to convert a single bit component mask to an index
+	/*
+	* Converts a single-bit component mask to its component index.
+	* The index corresponds to the bit position in the component mask.
+	*/
 	inline size_t ComponentIndex(Bitmask mask) {
 		ARCH_ASSERT(std::popcount(mask) == 1, "Not a single bit mask");
 		return std::countr_zero(mask) - 1;
@@ -102,12 +126,12 @@ namespace archestry {
 
 	// Stores component metadata
 	struct ComponentInfo {
-		size_t Size;
-		size_t Alignment;
-		bool IsTrivial;
-		ConstructFn MoveCtor;
-		AssignFn MoveAssign;
-		DestructFn Destruct;
+		size_t Size = 0;
+		size_t Alignment = 0;
+		bool IsTriviallyCopyable = false;
+		ConstructFn MoveCtor = nullptr;
+		AssignFn MoveAssign = nullptr;
+		DestructFn Destruct = nullptr;
 	};
 
 
@@ -131,7 +155,7 @@ namespace archestry {
 		}
 	private:
 		inline static uint64_t s_Counter = 0;
-		inline static std::vector<ComponentInfo> s_Components;
+		inline static std::array<ComponentInfo, MAX_COMPONENT_TYPE_COUNT> s_Components;
 
 		template<typename Component>
 		static const Bitmask RegisterType() {
@@ -163,15 +187,14 @@ namespace archestry {
 			const size_t index = s_Counter++;
 			const Bitmask mask = 2ULL << index;
 
-			s_Components.emplace_back(
+			s_Components[index] = ComponentInfo{
 				sizeof(Component),
 				alignof(Component),
 				isTrivialCopy,
 				!isTrivialCopy ? &MoveConstruct<Component> : nullptr,
 				!isTrivialCopy ? &MoveAssign<Component> : nullptr,
 				!isTrivialCopy ? &Destruct<Component> : nullptr
-
-			);
+			};
 
 			return mask;
 		}
@@ -195,14 +218,15 @@ namespace archestry {
 
 	// Utillity to combine multiple component bits into one mask
 	template<typename ...Components>
-	Bitmask CombineComponents() {
+	Bitmask ComponentMask() {
 		return (ComponentRegistry::GetMask<Components>() | ... | 0);
 	}
 
 
 	/*
 	* Type erased pool that stores and
-	* manages components contiguously in memory
+	* manages components contiguously in memory.
+	* Components are guaranteed to be tighly packed consecutively in memory.
 	*/
 	class ComponentPool {
 #pragma region Asserts
@@ -210,96 +234,76 @@ namespace archestry {
 #pragma endregion
 
 	private:
-		/*Self contained aligned buffer that is only
-		/ meant to be used inside this pool.
-		/ Pool is responsible for size.
-		*/
+		// Self contained raw buffer
 		class Buffer {
 		private:
-			void* m_pBase = nullptr;
-			void* m_pAligned = nullptr;
+			size_t m_Alignment = 0;
+			void* m_Data = nullptr;
 
-			void Free() {
-				std::free(m_pBase);
-				m_pBase = nullptr;
-				m_pAligned = nullptr;
+			void Release() {
+				::operator delete(m_Data, std::align_val_t(m_Alignment));
 			}
 
 		public:
 			Buffer() = delete;
 
-			Buffer(size_t size, size_t alignment) {
-				ARCH_ASSERT(alignment != 0 && (alignment & (~alignment)) == 0,
-					"Alignment must be non-zero and a power of 2");
-
-				m_pBase = std::malloc(size + alignment - 1);
-
-				if (!m_pBase) { throw std::bad_alloc(); }
-
-				// Round pointer up to nearest alignment multiple, if not already aligned
-				m_pAligned = reinterpret_cast<void*>(
-					((reinterpret_cast<uintptr_t>(m_pBase) + alignment - 1) & ~(alignment - 1))
-				);
-			}
+			Buffer(size_t size, size_t alignment) : 
+				m_Alignment(alignment),
+				m_Data(::operator new(size, std::align_val_t(alignment))) {}
 
 			Buffer& operator = (Buffer&& other) noexcept {
 				if (this == &other)
 					return *this;
-				Free();
-				m_pBase = other.m_pBase;
-				m_pAligned = other.m_pAligned;
-				other.m_pBase = nullptr;
-				other.m_pAligned = nullptr;
-
+				Release();
+				m_Alignment = other.m_Alignment;
+				m_Data = other.m_Data;
+				other.m_Data = nullptr;
 				return *this;
 			}
 
 			~Buffer() {
-				Free();
+				Release();
 			}
 
-			void* operator[](size_t byteOffset) {
-				return reinterpret_cast<void*>(
-					reinterpret_cast<uintptr_t>(m_pAligned) + byteOffset
-					);
+			void* Data() {
+				return m_Data;
 			}
 
-			const void* operator[](size_t byteOffset) const {
+			void* operator[](size_t offset) {
 				return reinterpret_cast<void*>(
-					reinterpret_cast<uintptr_t>(m_pAligned) + byteOffset
+					reinterpret_cast<uintptr_t>(m_Data) + offset
 					);
 			}
 		};
 
-		// Copy type determines the most efficient
-		// method to move components between pools
+		// Method to move components between pools
 		enum class CopyType {
 			Memcpy, // memcpy
 			Move // Move constructor & move assignment
 		};
 
 		const ComponentInfo m_ComponentInfo;
-
 		const CopyType m_CopyType;
-
 		Buffer m_Buffer;
-
 		size_t m_Capacity = 0;
-
 		size_t m_Size = 0;
+
+		size_t ByteOffset(size_t offset) const {
+			return m_ComponentInfo.Size * offset;
+		}
 
 		// Replace component at index a with component at index b
 		void Replace(size_t a, size_t b) {
-			void* aSrc = (*this)[a];
-			void* bSrc = (*this)[b];
+			void* dst = m_Buffer[ByteOffset(a)];
+			void* src = m_Buffer[ByteOffset(b)];
 
 			switch (m_CopyType) {
 			case CopyType::Memcpy:
-				memcpy(aSrc, bSrc, m_ComponentInfo.Size);
+				memcpy(dst, src, m_ComponentInfo.Size);
 				break;
 			case CopyType::Move:
-				m_ComponentInfo.MoveAssign(aSrc, bSrc);
-				m_ComponentInfo.Destruct(bSrc);
+				m_ComponentInfo.MoveAssign(dst, src);
+				m_ComponentInfo.Destruct(src);
 				break;
 			default:
 				ASSERT_INVALID_COPY_TYPE();
@@ -307,7 +311,7 @@ namespace archestry {
 		}
 
 		void Resize(size_t factor) {
-			const size_t newCapacity = 1 + factor * m_Capacity;
+			const size_t newCapacity = m_Capacity > 0 ? factor * m_Capacity : 1;
 			Buffer newBuffer(newCapacity * m_ComponentInfo.Size, m_ComponentInfo.Alignment);
 
 			switch (m_CopyType) {
@@ -316,8 +320,8 @@ namespace archestry {
 				* Copy all components from the start of the current buffer
 				* to the start of the new buffer.
 				*/
-				void* dst = newBuffer[0];
-				void* src = (*this)[0];
+				void* dst = newBuffer.Data();
+				void* src = m_Buffer.Data();
 				memcpy(dst, src, m_Size * m_ComponentInfo.Size);
 				break;
 			}
@@ -329,8 +333,8 @@ namespace archestry {
 				*/
 				const size_t size = m_Size;
 				for (size_t i = 0; i < size; i++) {
-					void* dst = newBuffer[i * m_ComponentInfo.Size];
-					void* src = (*this)[i];
+					void* dst = newBuffer[ByteOffset(i)];
+					void* src = m_Buffer[ByteOffset(i)];
 					m_ComponentInfo.MoveCtor(dst, src);
 					m_ComponentInfo.Destruct(src);
 				}
@@ -345,8 +349,7 @@ namespace archestry {
 		}
 
 		void EnsureSize() {
-			if (m_Size >= m_Capacity)
-				Resize(2);
+			if (m_Size >= m_Capacity) Resize(2);
 		}
 
 	public:
@@ -354,15 +357,11 @@ namespace archestry {
 
 		ComponentPool(ComponentInfo info, size_t capacity) :
 			m_ComponentInfo(info),
-			m_CopyType(m_ComponentInfo.IsTrivial ? CopyType::Memcpy : CopyType::Move),
-			m_Buffer(capacity* m_ComponentInfo.Size, m_ComponentInfo.Alignment),
+			m_CopyType(m_ComponentInfo.IsTriviallyCopyable ? CopyType::Memcpy : CopyType::Move),
+			m_Buffer(capacity * m_ComponentInfo.Size, m_ComponentInfo.Alignment),
 			m_Capacity(capacity),
 			m_Size(0) {
 			// ASSERT valid componentInfo
-			/*
-			// For copy types, trivial copying (using memcpy)
-			// is the most favourable and has precedence over move constructors
-			*/
 		}
 
 		ComponentPool(const ComponentPool& other) = delete;
@@ -371,15 +370,17 @@ namespace archestry {
 
 		~ComponentPool() {
 			if (m_CopyType == CopyType::Move)
-				for (size_t i = 0; i < m_Size; i++)
-					m_ComponentInfo.Destruct((*this)[i]);
+				for (size_t i = 0; i < m_Size; i++) {
+					void* toDestroy = m_Buffer[ByteOffset(i)];
+					m_ComponentInfo.Destruct(toDestroy);
+				}
 		}
 
 		template<typename Component, typename... Args>
 		Component& Emplace(Args&&... args) {
 			EnsureSize();
 
-			void* dst = m_Buffer[m_Size * m_ComponentInfo.Size];
+			void* dst = m_Buffer[ByteOffset(m_Size)];
 			new (dst) Component(std::forward<Args>(args)...);
 
 			m_Size++;
@@ -388,11 +389,10 @@ namespace archestry {
 		}
 
 		// Type erased component addition
-		// through memcpy / move semantics
 		void* Add(void* component) {
 			EnsureSize();
 
-			void* dst = m_Buffer[m_Size * m_ComponentInfo.Size];
+			void* dst = m_Buffer[ByteOffset(m_Size)];
 
 			switch (m_CopyType) {
 			case CopyType::Memcpy:
@@ -411,31 +411,31 @@ namespace archestry {
 		}
 
 		void Delete(size_t index) {
-			// We skip the replacement if the component is the last in the pool
+			// Skip the replacement if the component is the last in the pool
 			if (index != m_Size - 1)
 				/*
-				* replace the component to be deleted with the last component and then delete it
+				* Replace the component to be deleted with the last component and then delete it
 				* to maintain continuous and tightly packed memory
 				*/
 				Replace(index, m_Size - 1);
-			else if (!m_ComponentInfo.IsTrivial)
-				m_ComponentInfo.Destruct((*this)[m_Size - 1]);
+			else if (!m_ComponentInfo.IsTriviallyCopyable)
+				m_ComponentInfo.Destruct(m_Buffer[(m_Size - 1) * m_ComponentInfo.Size]);
 
 			m_Size--;
+		}
+
+		template<typename T>
+		T* GetBase() {
+			return static_cast<T*>(m_Buffer.Data());
 		}
 
 		size_t GetSize() const {
 			return m_Size;
 		}
 
-		/*
-		* returns void* to a component at the given index.
-		* Components are guaranteed to be tighly packed consecutively in memory,
-		* each occupying ComponentInfo.Size bytes
-		*/
-		void* operator[](size_t index) {
-			ARCH_ASSERT(index < m_Size, "Index " << index << " out of range (" << m_Size << ")");
-			return m_Buffer[index * m_ComponentInfo.Size];
+		void* operator [](size_t index) {
+			ARCH_ASSERT(index < m_Size, "Index out of bounds: ");
+			return m_Buffer[ByteOffset(index)];
 		}
 	};
 
@@ -464,26 +464,29 @@ namespace archestry {
 		* indexToEntity[index] -> entity at index in component pool(s)
 		*/
 		std::vector<EntityID> m_IndexToEntity;
-		std::vector<size_t>& m_EntityToIndex;
+		std::vector<EntityMeta>& m_EntityToIndex;
 
-		// Scales with max component type count.
 		std::array<std::unique_ptr<ComponentPool>, MAX_COMPONENT_TYPE_COUNT> m_Pools;
 
 		// Registers the entity once and tracks its components as they are added.
 		void EnsureEntity(EntityID ID, Bitmask componentMask) {
 			if (m_PendingMask == 0) {
 				AssertSyncedPools();
-				m_LastAddedEntity = ID;
 				m_PendingMask = m_ArchetypeMask;
-				m_EntityToIndex[ID] = m_Size++;
-				m_IndexToEntity.push_back(ID);
-				
+				m_LastAddedEntity = ID;
 			}
 
 			ARCH_ASSERT(ID == m_LastAddedEntity,
 				"Different entity ID.");
 
 			m_PendingMask &= ~componentMask;
+
+			// Final component added.
+			if (m_PendingMask == 0)
+			{
+				m_EntityToIndex[ID].Index = m_Size++;
+				m_IndexToEntity.push_back(ID);
+			}
 		}
 
 		bool ArePoolsSynced() const {
@@ -494,21 +497,20 @@ namespace archestry {
 			return true;
 		}
 
-		ARCH_FORCEINLINE void AssertSyncedPools() const {
+		void AssertSyncedPools() const {
 			ARCH_ASSERT(ArePoolsSynced(), "Component pools out of sync.");
 		}
 
 		template<typename Component>
 		ARCH_FORCEINLINE ComponentPool& GetPool() {
-			static const auto index = ComponentIndex(
-				ComponentRegistry::GetMask<Component>());
+			static const auto index = ComponentIndex(ComponentRegistry::GetMask<Component>());
 			return *m_Pools[index];
 		}
 
 	public:
 		Archetype() = delete;
 
-		Archetype(Bitmask archetypeMask, std::vector<size_t>& entityToIndex) :
+		Archetype(Bitmask archetypeMask, std::vector<EntityMeta>& entityToIndex) :
 			m_ArchetypeMask(archetypeMask),
 			m_EntityToIndex(entityToIndex) {
 
@@ -527,38 +529,32 @@ namespace archestry {
 
 		template<typename Component, typename... Args>
 		Component& Emplace(EntityID ID, Args&&... args) noexcept {
-			EnsureEntity(ID, ComponentRegistry::GetMask<Component>());
+			EnsureEntity(ID, ComponentMask<Component>());
 			return GetPool<Component>().Emplace<Component>(std::forward<Args>(args)...);
 		}
 
 		template<typename ...Components>
 		std::tuple<Components&...> AddMultiple(EntityID ID, Components&&... components) {
-			EnsureEntity(ID, CombineComponents<Components...>());
-			return std::tuple<Components&...> {
-				*static_cast<Components*>(GetPool<Components>().Add(&components))...
-			};
+			EnsureEntity(ID, ComponentMask<Components...>());
+			return std::tuple<Components&...> { *static_cast<Components*>(GetPool<Components>().Add(&components))... };
 		}
 
 		template<typename Component>
 		Component& Get(size_t index) {
 			AssertSyncedPools();
-			return *static_cast<Component*>(GetPool<Component>()[index]);
+			return GetPool<Component>().GetBase<Component>()[index];
 		}
 
 		template<typename ...Components>
 		std::tuple<Components&...> GetMultiple(size_t index) {
 			AssertSyncedPools();
-			return std::tuple<Components&...>{
-				*static_cast<Components*>(GetPool<Components>()[index])...
-			};
+			return std::tuple<Components&...>{ GetPool<Components>().GetBase<Components>()[index]... };
 		}
 
 		template<typename ...Components>
 		std::tuple<Components&...> First() {
 			AssertSyncedPools();
-			return std::tuple<Components&...> {
-				*static_cast<Components*>(GetPool<Components>()[0])...
-			};
+			return std::tuple<Components&...> { *GetPool<Components>().GetBase<Components>()... };
 		}
 
 		template<typename ...Components, typename Fn>
@@ -567,9 +563,7 @@ namespace archestry {
 
 			// Cache pool base pointers before iteration
 			// to avoid multiple pointer indirections
-			auto typedPools = std::make_tuple(
-				static_cast<Components*>(GetPool<Components>()[0])...
-			);
+			auto typedPools = std::make_tuple(GetPool<Components>().GetBase<Components>()...);
 
 			std::apply([&](auto... ptrs) {
 				const size_t size = m_Size; // Micro-opt, Prevent reloads
@@ -597,16 +591,14 @@ namespace archestry {
 
 		/*
 		* Used in a type erased context.
-		* Move every relevant component belonging
-		* to given entity, to the other archetype,
-		* and delete entity and all its existing
-		* components in current archetype.
+		* Move every relevant component of entity to other archetype.
+		* TODO: Move this responsibility to orchestrator.
 		*/
 		void Move(EntityID ID, Archetype& other) {
 			AssertSyncedPools();
 			other.AssertSyncedPools();
 
-			const size_t entityIndex = m_EntityToIndex[ID];
+			const size_t index = m_EntityToIndex[ID].Index;
 
 			for (BitmaskIterator it{ m_ArchetypeMask }; it.HasNext();) {
 				const Bitmask componentMask = it.Next();
@@ -614,11 +606,11 @@ namespace archestry {
 
 				if (other.m_ArchetypeMask & componentMask) {
 					other.EnsureEntity(ID, componentMask);
-					other.m_Pools[componentIndex]->Add((*m_Pools[componentIndex])[entityIndex]);
+					other.m_Pools[componentIndex]->Add((*m_Pools[componentIndex])[index]);
 				}
 			}
 
-			Delete(entityIndex);
+			Delete(index);
 		}
 
 		void Delete(size_t index) {
@@ -637,12 +629,16 @@ namespace archestry {
 				return;
 			}
 
-			// Replacement occured, update last entity to deleted entity index.
+			// Replacement occured, update last entity to deleted entity's index.
 			EntityID lastEntityID = m_IndexToEntity[m_Size - 1];
-			m_EntityToIndex[lastEntityID] = index;
+			m_EntityToIndex[lastEntityID].Index = index;
 			m_IndexToEntity[index] = lastEntityID;
 			m_IndexToEntity.pop_back();
 			m_Size--;
+		}
+
+		Bitmask GetMask() const {
+			return m_ArchetypeMask;
 		}
 
 		bool IsEmpty() const {
@@ -656,40 +652,21 @@ namespace archestry {
 		}
 	};
 
+
 	// Main orchestrator of the ECS
 	class Registry {
 	private:
 		template<typename...>
 		friend class Query;
 
-		EntityID m_MaxID = 0;
-
-		/*
-		* The entityMask encodes which archetype
-		* an entity belongs to, based on its combination of components.
-		* The first bit is reserved for storing the entity's state
-		* and is ignored when querying archetypes.
-		*/
-		std::vector<Bitmask> m_Entities;
-
-		// Stores IDs of deleted entities for later reuse.
-		std::vector<EntityID> m_IdCache;
-
-		/*
-		* O(1) entity -> index lookup.
-		* Scales with max entity ID.
-		* Registry owns this vector,
-		* archetypes reference it for fast lookups.
-		*/
-		std::vector<size_t> m_EntityToIndex;
-
-		// Container for all archetypes.
+		std::vector<EntityMeta> m_Entities;
+		std::vector<EntityID> m_IDCache;
 		std::unordered_map<Bitmask, Archetype> m_Types;
 
 		void AssertValidEntity(EntityID ID) const {
 			ARCH_ASSERT(ID != NULL_ENTITY, "NULL_Entity");
-			ARCH_ASSERT(ID < m_MaxID, "Entity with ID " << ID << " is invalid.");
-			ARCH_ASSERT(m_Entities[ID] != INACTIVE_ENTITY, "Entity with ID " << ID << " is inactive.");
+			ARCH_ASSERT(ID < m_Entities.size(), "Entity with ID " << ID << " is invalid.");
+			ARCH_ASSERT(m_Entities[ID].Mask != INACTIVE_ENTITY, "Entity with ID " << ID << " is inactive.");
 		}
 
 		/*
@@ -697,28 +674,31 @@ namespace archestry {
 		* the archetype for the given mask.
 		*/
 		Archetype& GetOrCreateArchetype(Bitmask mask) {
-			return m_Types.try_emplace(mask, mask, m_EntityToIndex).first->second;
+			return m_Types.try_emplace(mask, mask, m_Entities).first->second;
 		}
 
 		// Enforce destroyed empty archetypes invariant
-		void DestroyArchetypeIfEmpty(Bitmask mask, Archetype& arch) {
-			if (arch.IsEmpty())
-				m_Types.erase(mask);
+		void DestroyArchetypeIfEmpty(Archetype& arch) {
+			if (arch.IsEmpty()) m_Types.erase(arch.GetMask());
+		}
+
+		// Returns mask with cleared entity state bit
+		Bitmask WithoutStateBit(Bitmask mask) const {
+			return mask & ~ACTIVE_ENTITY;
 		}
 	public:
 		Registry() = default;
 
 		EntityID CreateEntity() {
 			EntityID ID;
-			if (m_IdCache.size()) {
-				ID = m_IdCache.back();
-				m_IdCache.pop_back();
-				m_Entities[ID] = ACTIVE_ENTITY;
+			if (m_IDCache.size()) {
+				ID = m_IDCache.back();
+				m_IDCache.pop_back();
+				m_Entities[ID].Mask = ACTIVE_ENTITY;
 			}
 			else {
-				ID = m_MaxID++;
-				m_Entities.push_back(ACTIVE_ENTITY);
-				m_EntityToIndex.push_back(0);
+				ID = m_Entities.size();
+				m_Entities.push_back(EntityMeta{});
 			}
 
 			return ID;
@@ -726,42 +706,39 @@ namespace archestry {
 
 		void DeleteEntity(EntityID ID) {
 			AssertValidEntity(ID);
+			
+			auto& entity = m_Entities[ID];
 
-			Bitmask& entityMask = m_Entities[ID];
-			const Bitmask archMask = entityMask & ~ACTIVE_ENTITY;
-
-			// Destroy associated components
-			if (archMask) {
-				auto& arch = m_Types.at(archMask);
-				arch.Delete(m_EntityToIndex[ID]);
-				DestroyArchetypeIfEmpty(archMask, arch);
+			// Destroy associated components, if any
+			if (entity.Archetype) {
+				entity.Archetype->Delete(entity.Index);
+				DestroyArchetypeIfEmpty(*entity.Archetype);
 			}
-			entityMask = INACTIVE_ENTITY;
-			m_IdCache.push_back(ID);
+			entity = { .Mask = INACTIVE_ENTITY };
+			m_IDCache.push_back(ID);
 		}
 
 		template<typename Component, typename... Args>
 		Component& AddComponent(EntityID ID, Args&&... args) {
 			AssertValidEntity(ID);
+
 			ARCH_ASSERT(!HasComponent<Component>(ID),
 				"Entity already has the specified component.");
 
-			Bitmask& entityMask = m_Entities[ID];
-			const Bitmask componentMask = ComponentRegistry::GetMask<Component>();
-			const Bitmask oldArchMask = entityMask & ~ACTIVE_ENTITY;
-			auto& newArch = GetOrCreateArchetype(oldArchMask | componentMask);
+			EntityMeta& entity = m_Entities[ID];
+			Bitmask componentMask = ComponentRegistry::GetMask<Component>();
+			auto& newArch = GetOrCreateArchetype(WithoutStateBit(entity.Mask) | componentMask);
 
-			if (oldArchMask) {
+			if (entity.Archetype) {
 				// Move entity components to the new archetype.
-				auto& oldArch = m_Types.at(oldArchMask);
-				oldArch.Move(ID, newArch);
-				DestroyArchetypeIfEmpty(oldArchMask, oldArch);
+				entity.Archetype->Move(ID, newArch);
+				DestroyArchetypeIfEmpty(*entity.Archetype);
 			}
 
 			Component& addedComponent = newArch.Emplace<Component>(ID, std::forward<Args>(args)...);
 
-			// Update entity mask to reflect the change (added component)
-			entityMask |= componentMask;
+			entity.Mask |= componentMask; // Add components bits to entity mask
+			entity.Archetype = &newArch;
 
 			return addedComponent;
 		}
@@ -772,22 +749,20 @@ namespace archestry {
 			ARCH_ASSERT(!HasAnyComponent<Components...>(ID),
 				"Entity already has atleast one of the specified components.");
 
-			Bitmask& entityMask = m_Entities.at(ID);
-			const Bitmask componentMask = CombineComponents<Components...>();
-			const Bitmask oldArchMask = entityMask & ~ACTIVE_ENTITY;
-			auto& newArch = GetOrCreateArchetype(oldArchMask | componentMask);
+			EntityMeta& entity = m_Entities[ID];
+			Bitmask componentMask = ComponentMask<Components...>();
+			auto& newArch = GetOrCreateArchetype(WithoutStateBit(entity.Mask) | componentMask);
 
-			if (oldArchMask) {
-				auto& oldArch = m_Types.at(oldArchMask);
-				oldArch.Move(ID, newArch);
-				DestroyArchetypeIfEmpty(oldArchMask, oldArch);
+			if (entity.Archetype) {
+				entity.Archetype->Move(ID, newArch);
+				DestroyArchetypeIfEmpty(*entity.Archetype);
 			}
 
-			auto addedComponents = newArch.AddMultiple<Components...>(
-				ID, std::forward<Components>(components)...
-			);
+			auto addedComponents = newArch.AddMultiple<Components...>(ID, std::forward<Components>(components)...);
 
-			entityMask |= componentMask;
+			entity.Mask |= componentMask;
+			entity.Archetype = &newArch;
+
 
 			return addedComponents;
 		}
@@ -803,47 +778,47 @@ namespace archestry {
 			ARCH_ASSERT(HasAllComponents<Components...>(ID),
 				"Entity must have all of the specified components.");
 
-			Bitmask& entityMask = m_Entities[ID];
-			const Bitmask componentMask = CombineComponents<Components...>();
-			const Bitmask oldArchMask = entityMask & ~ACTIVE_ENTITY;
-			const Bitmask newArchMask = oldArchMask & ~componentMask;
+			EntityMeta& entity = m_Entities[ID];
+			Bitmask componentMask = ComponentMask<Components...>();
+			Bitmask newArchMask = WithoutStateBit(entity.Mask) & ~componentMask;
 
-			auto& oldArch = m_Types.at(oldArchMask);
+			auto& oldArch = *entity.Archetype;
 
-			if (newArchMask)
-				oldArch.Move(ID, GetOrCreateArchetype(newArchMask));
-			else
-				oldArch.Delete(m_EntityToIndex[ID]);
+			if (newArchMask) {
+				auto& newArch = GetOrCreateArchetype(newArchMask);
+				oldArch.Move(ID, newArch);
+				entity.Archetype = &newArch;
+			}
+			else {
+				oldArch.Delete(entity.Index);
+				entity = { .Mask = entity.Mask };
+			}
 
-			DestroyArchetypeIfEmpty(oldArchMask, oldArch);
+			DestroyArchetypeIfEmpty(oldArch);
 
-			entityMask &= ~componentMask;
+			entity.Mask &= ~componentMask;
 		}
 
 		template<typename Component>
 		Component& GetComponent(EntityID ID) {
 			AssertValidEntity(ID);
-			ARCH_ASSERT(HasComponent<Component>(ID),
-				"Entity does not have the specified component.");
-			Bitmask mask = m_Entities[ID] & ~ACTIVE_ENTITY;
-
-			return m_Types.at(mask).Get<Component>(m_EntityToIndex[ID]);
+			ARCH_ASSERT(HasComponent<Component>(ID), "Entity does not have the specified component.");
+			EntityMeta& entity = m_Entities[ID];
+			return entity.Archetype->Get<Component>(entity.Index);
 		}
 
 		template<typename... Components>
 		std::tuple<Components&...> GetComponents(EntityID ID) {
 			AssertValidEntity(ID);
-			ARCH_ASSERT(HasAllComponents<Components...>(ID),
-				"Entity does not have all the specicied components.");
-			Bitmask mask = m_Entities[ID] & ~ACTIVE_ENTITY;
-			
-			return m_Types.at(mask).GetMultiple<Components...>(m_EntityToIndex[ID]);
+			ARCH_ASSERT(HasAllComponents<Components...>(ID), "Entity does not have all the specicied components.");
+			EntityMeta& entity = m_Entities[ID];
+			return entity.Archetype->GetMultiple<Components...>(entity.Index);
 		}
 
 		template<typename Component>
 		bool HasComponent(EntityID ID) const {
 			AssertValidEntity(ID);
-			return m_Entities[ID] & ComponentRegistry::GetMask<Component>();
+			return m_Entities[ID].Mask & ComponentMask<Component>();
 		}
 
 		template<typename... Components>
@@ -861,24 +836,14 @@ namespace archestry {
 			return { this };
 		}
 
-		template<typename ...Components, typename Fn>
-		void ForEach(Fn&& fn, Bitmask excluded = 0) {
-			for (auto& [mask, archetype] : m_Types) {
-
-				archetype.ForEach<Components...>(std::forward<Fn>(fn));
-			}
-		}
-
 		void Reset() {
-			m_MaxID = 0;
 			m_Entities.clear();
-			m_IdCache.clear();
-			m_EntityToIndex.clear();
+			m_IDCache.clear();
 			m_Types.clear();
 		}
 
 		size_t GetEntityCount() const {
-			return m_Entities.size() - m_IdCache.size();
+			return m_Entities.size() - m_IDCache.size();
 		}
 
 		size_t GetArchetypeCount() const {
@@ -917,7 +882,7 @@ namespace archestry {
 	public:
 		Query(Registry* registry) :
 			m_Registry(registry),
-			m_IncludedMask(CombineComponents<Components...>()) {
+			m_IncludedMask(ComponentMask<Components...>()) {
 			
 			static_assert(sizeof...(Components) != 0,
 				"Query requires at least one component.");
@@ -929,7 +894,7 @@ namespace archestry {
 		template<typename ...ExcludedComponents>
 		Query& Without() {
 			m_ExcludedMask |= 
-				CombineComponents<ExcludedComponents...>();
+				ComponentMask<ExcludedComponents...>();
 
 			return *this;
 		}
@@ -939,7 +904,7 @@ namespace archestry {
 			m_Registry->AssertValidEntity(ID);
 
 			return m_Registry->template HasAllComponents<Components...>(ID) &&
-				((m_Registry->m_Entities[ID] & m_ExcludedMask) == 0);
+				((m_Registry->m_Entities[ID].Mask & m_ExcludedMask) == 0);
 		}
 
 		// Return the first found set of components
