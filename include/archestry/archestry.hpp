@@ -108,11 +108,11 @@ namespace archestry {
 	}
 
 
-	struct ComponentInfo {
+	struct ComponentMeta {
 		size_t Size = 0;
 		size_t Alignment = 0;
 		bool IsTriviallyCopyable = false;
-		ConstructFn MoveCtor = nullptr;
+		ConstructFn MoveConstruct = nullptr;
 		AssignFn MoveAssign = nullptr;
 		DestructFn Destruct = nullptr;
 	};
@@ -131,14 +131,14 @@ namespace archestry {
 			return mask;
 		}
 
-		static const ComponentInfo& GetInfo(Bitmask mask) {
+		static const ComponentMeta& GetInfo(Bitmask mask) {
 			ARCH_ASSERT(ComponentIndex(mask) < s_Counter,
 				"Component with mask " << mask << " is not registered.");
 			return s_Components[ComponentIndex(mask)];
 		}
 	private:
 		inline static uint64_t s_Counter = 0;
-		inline static std::array<ComponentInfo, MAX_COMPONENT_TYPE_COUNT> s_Components;
+		inline static std::array<ComponentMeta, MAX_COMPONENT_TYPE_COUNT> s_Components;
 
 		template<typename Component>
 		static const Bitmask RegisterType() {
@@ -170,7 +170,7 @@ namespace archestry {
 			const size_t index = s_Counter++;
 			const Bitmask mask = 2ULL << index;
 
-			s_Components[index] = ComponentInfo{
+			s_Components[index] = ComponentMeta{
 				sizeof(Component),
 				alignof(Component),
 				isTrivialCopy,
@@ -253,7 +253,7 @@ namespace archestry {
 			Move // Move constructor & move assignment
 		};
 
-		const ComponentInfo m_ComponentInfo;
+		const ComponentMeta m_ComponentInfo;
 		const CopyType m_CopyType;
 		Buffer m_Buffer;
 		size_t m_Capacity = 0;
@@ -316,7 +316,7 @@ namespace archestry {
 	public:
 		ComponentPool() = delete;
 
-		ComponentPool(ComponentInfo info, size_t capacity) :
+		ComponentPool(ComponentMeta info, size_t capacity) :
 			m_ComponentInfo(info),
 			m_CopyType(m_ComponentInfo.IsTriviallyCopyable ? CopyType::Memcpy : CopyType::Move),
 			m_Buffer(capacity * m_ComponentInfo.Size, m_ComponentInfo.Alignment),
@@ -360,7 +360,7 @@ namespace archestry {
 				memcpy(dst, component, m_ComponentInfo.Size);
 				break;
 			case CopyType::Move:
-				m_ComponentInfo.MoveCtor(dst, component);
+				m_ComponentInfo.MoveConstruct(dst, component);
 				break;
 			default:
 				ARCH_ASSERT(false, "Unsupported copy type");
