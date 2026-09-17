@@ -296,7 +296,7 @@ namespace archestry {
 				for (size_t i = 0; i < size; i++) {
 					void* dst = newBuffer[ByteOffset(i)];
 					void* src = m_Buffer[ByteOffset(i)];
-					m_ComponentInfo.MoveAssign(dst, src);
+					m_ComponentInfo.MoveConstruct(dst, src);
 					m_ComponentInfo.Destruct(src);
 				}
 				break;
