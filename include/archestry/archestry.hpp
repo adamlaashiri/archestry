@@ -131,7 +131,7 @@ namespace archestry {
 			return mask;
 		}
 
-		static const ComponentMeta& GetInfo(Bitmask mask) {
+		static const ComponentMeta& GetMeta(Bitmask mask) {
 			ARCH_ASSERT(ComponentIndex(mask) < s_Counter,
 				"Component with mask " << mask << " is not registered.");
 			return s_Components[ComponentIndex(mask)];
@@ -253,14 +253,14 @@ namespace archestry {
 			Move // Move constructor & move assignment
 		};
 
-		const ComponentMeta m_ComponentInfo;
+		const ComponentMeta m_ComponentMeta;
 		const CopyType m_CopyType;
 		Buffer m_Buffer;
 		size_t m_Capacity = 0;
 		size_t m_Size = 0;
 
 		size_t ByteOffset(size_t offset) const {
-			return m_ComponentInfo.Size * offset;
+			return m_ComponentMeta.Size * offset;
 		}
 
 		void Replace(size_t a, size_t b) {
@@ -269,11 +269,11 @@ namespace archestry {
 
 			switch (m_CopyType) {
 			case CopyType::Memcpy:
-				memcpy(dst, src, m_ComponentInfo.Size);
+				memcpy(dst, src, m_ComponentMeta.Size);
 				break;
 			case CopyType::Move:
-				m_ComponentInfo.MoveAssign(dst, src);
-				m_ComponentInfo.Destruct(src);
+				m_ComponentMeta.MoveAssign(dst, src);
+				m_ComponentMeta.Destruct(src);
 				break;
 			default:
 				ARCH_ASSERT(false, "Unsupported copy type");
@@ -282,13 +282,13 @@ namespace archestry {
 
 		void Resize(size_t factor) {
 			const size_t newCapacity = m_Capacity > 0 ? factor * m_Capacity : 1;
-			Buffer newBuffer(newCapacity * m_ComponentInfo.Size, m_ComponentInfo.Alignment);
+			Buffer newBuffer(newCapacity * m_ComponentMeta.Size, m_ComponentMeta.Alignment);
 
 			switch (m_CopyType) {
 			case CopyType::Memcpy: {
 				void* dst = newBuffer.Data();
 				void* src = m_Buffer.Data();
-				memcpy(dst, src, m_Size * m_ComponentInfo.Size);
+				memcpy(dst, src, m_Size * m_ComponentMeta.Size);
 				break;
 			}
 			case CopyType::Move: {
@@ -296,8 +296,8 @@ namespace archestry {
 				for (size_t i = 0; i < size; i++) {
 					void* dst = newBuffer[ByteOffset(i)];
 					void* src = m_Buffer[ByteOffset(i)];
-					m_ComponentInfo.MoveConstruct(dst, src);
-					m_ComponentInfo.Destruct(src);
+					m_ComponentMeta.MoveConstruct(dst, src);
+					m_ComponentMeta.Destruct(src);
 				}
 				break;
 			}
@@ -316,10 +316,10 @@ namespace archestry {
 	public:
 		ComponentPool() = delete;
 
-		ComponentPool(ComponentMeta info, size_t capacity) :
-			m_ComponentInfo(info),
-			m_CopyType(m_ComponentInfo.IsTriviallyCopyable ? CopyType::Memcpy : CopyType::Move),
-			m_Buffer(capacity * m_ComponentInfo.Size, m_ComponentInfo.Alignment),
+		ComponentPool(ComponentMeta meta, size_t capacity) :
+			m_ComponentMeta(meta),
+			m_CopyType(m_ComponentMeta.IsTriviallyCopyable ? CopyType::Memcpy : CopyType::Move),
+			m_Buffer(capacity * m_ComponentMeta.Size, m_ComponentMeta.Alignment),
 			m_Capacity(capacity),
 			m_Size(0) {
 			// ASSERT valid componentInfo
@@ -333,7 +333,7 @@ namespace archestry {
 			if (m_CopyType == CopyType::Move)
 				for (size_t i = 0; i < m_Size; i++) {
 					void* toDestroy = m_Buffer[ByteOffset(i)];
-					m_ComponentInfo.Destruct(toDestroy);
+					m_ComponentMeta.Destruct(toDestroy);
 				}
 		}
 
@@ -357,10 +357,10 @@ namespace archestry {
 
 			switch (m_CopyType) {
 			case CopyType::Memcpy:
-				memcpy(dst, component, m_ComponentInfo.Size);
+				memcpy(dst, component, m_ComponentMeta.Size);
 				break;
 			case CopyType::Move:
-				m_ComponentInfo.MoveConstruct(dst, component);
+				m_ComponentMeta.MoveConstruct(dst, component);
 				break;
 			default:
 				ARCH_ASSERT(false, "Unsupported copy type");
@@ -379,8 +379,8 @@ namespace archestry {
 				* to maintain continuous and tightly packed memory
 				*/
 				Replace(index, m_Size - 1);
-			else if (!m_ComponentInfo.IsTriviallyCopyable)
-				m_ComponentInfo.Destruct(m_Buffer[(m_Size - 1) * m_ComponentInfo.Size]);
+			else if (!m_ComponentMeta.IsTriviallyCopyable)
+				m_ComponentMeta.Destruct(m_Buffer[(m_Size - 1) * m_ComponentMeta.Size]);
 
 			m_Size--;
 		}
@@ -477,7 +477,7 @@ namespace archestry {
 				const Bitmask componentMask = it.Next();
 				m_Pools[ComponentIndex(componentMask)] = 
 					std::make_unique<ComponentPool>(
-						ComponentRegistry::GetInfo(componentMask),
+						ComponentRegistry::GetMeta(componentMask),
 						1
 					);
 			}
