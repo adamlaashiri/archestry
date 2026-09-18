@@ -76,7 +76,7 @@ namespace archestry {
 		size_t Index = 0;
 	};
 
-	
+
 	// Iterates over the set bits in a bitmask.
 	struct BitmaskIterator {
 		Bitmask Mask = 0;
@@ -218,9 +218,10 @@ namespace archestry {
 		public:
 			Buffer() = delete;
 
-			Buffer(size_t size, size_t alignment) : 
+			Buffer(size_t size, size_t alignment) :
 				m_Alignment(alignment),
-				m_Data(::operator new(size, std::align_val_t(alignment))) {}
+				m_Data(::operator new(size, std::align_val_t(alignment))) {
+			}
 
 			Buffer& operator = (Buffer&& other) noexcept {
 				if (this == &other)
@@ -319,7 +320,7 @@ namespace archestry {
 		ComponentPool(ComponentMeta meta, size_t capacity) :
 			m_ComponentMeta(meta),
 			m_CopyType(m_ComponentMeta.IsTriviallyCopyable ? CopyType::Memcpy : CopyType::Move),
-			m_Buffer(capacity * m_ComponentMeta.Size, m_ComponentMeta.Alignment),
+			m_Buffer(capacity* m_ComponentMeta.Size, m_ComponentMeta.Alignment),
 			m_Capacity(capacity),
 			m_Size(0) {
 			// ASSERT valid componentInfo
@@ -419,7 +420,7 @@ namespace archestry {
 		Bitmask m_PendingMask = 0;
 
 		size_t m_Size = 0;
-		
+
 		std::vector<EntityID> m_IndexToEntity;
 
 		// m_Entities[index].index -> entity at index in component pool(s).
@@ -475,7 +476,7 @@ namespace archestry {
 
 			for (BitmaskIterator it{ archetypeMask }; it.HasNext();) {
 				const Bitmask componentMask = it.Next();
-				m_Pools[ComponentIndex(componentMask)] = 
+				m_Pools[ComponentIndex(componentMask)] =
 					std::make_unique<ComponentPool>(
 						ComponentRegistry::GetMeta(componentMask),
 						1
@@ -495,8 +496,8 @@ namespace archestry {
 		template<typename ...Components>
 		std::tuple<Components&...> AddMultiple(EntityID ID, Components&&... components) {
 			EnsureEntity(ID, ComponentMask<Components...>());
-			return std::tuple<Components&...> { 
-				*static_cast<Components*>(GetPool<Components>().Add(&components))... 
+			return std::tuple<Components&...> {
+				*static_cast<Components*>(GetPool<Components>().Add(&components))...
 			};
 		}
 
@@ -509,16 +510,16 @@ namespace archestry {
 		template<typename ...Components>
 		std::tuple<Components&...> GetMultiple(size_t index) {
 			AssertSyncedPools();
-			return std::tuple<Components&...>{ 
-				GetPool<Components>().GetBase<Components>()[index]... 
+			return std::tuple<Components&...>{
+				GetPool<Components>().GetBase<Components>()[index]...
 			};
 		}
 
 		template<typename ...Components>
 		std::tuple<Components&...> First() {
 			AssertSyncedPools();
-			return std::tuple<Components&...> { 
-				*GetPool<Components>().GetBase<Components>()... 
+			return std::tuple<Components&...> {
+				*GetPool<Components>().GetBase<Components>()...
 			};
 		}
 
@@ -662,7 +663,7 @@ namespace archestry {
 
 		void DeleteEntity(EntityID ID) {
 			AssertValidEntity(ID);
-			
+
 			auto& entity = m_Entities[ID];
 
 			// Destroy associated components, if any
@@ -837,15 +838,15 @@ namespace archestry {
 		Query(Registry* registry) :
 			m_Registry(registry),
 			m_IncludedMask(ComponentMask<Components...>()) {
-			
+
 			static_assert(sizeof...(Components) != 0,
 				"Query requires at least one component.");
-				
+
 		}
 
 		template<typename ...ExcludedComponents>
 		Query& Without() {
-			m_ExcludedMask |= 
+			m_ExcludedMask |=
 				ComponentMask<ExcludedComponents...>();
 
 			return *this;
