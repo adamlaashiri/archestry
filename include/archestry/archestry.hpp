@@ -254,14 +254,14 @@ namespace archestry {
 			Move // Move constructor & move assignment
 		};
 
-		const ComponentMeta m_ComponentMeta;
+		const ComponentMeta m_Meta;
 		const CopyType m_CopyType;
 		Buffer m_Buffer;
 		size_t m_Capacity = 0;
 		size_t m_Size = 0;
 
 		size_t ByteOffset(size_t offset) const {
-			return m_ComponentMeta.Size * offset;
+			return m_Meta.Size * offset;
 		}
 
 		void Replace(size_t a, size_t b) {
@@ -270,11 +270,11 @@ namespace archestry {
 
 			switch (m_CopyType) {
 			case CopyType::Memcpy:
-				memcpy(dst, src, m_ComponentMeta.Size);
+				memcpy(dst, src, m_Meta.Size);
 				break;
 			case CopyType::Move:
-				m_ComponentMeta.MoveAssign(dst, src);
-				m_ComponentMeta.Destruct(src);
+				m_Meta.MoveAssign(dst, src);
+				m_Meta.Destruct(src);
 				break;
 			default:
 				ARCH_ASSERT(false, "Unsupported copy type");
@@ -283,13 +283,13 @@ namespace archestry {
 
 		void Resize(size_t factor) {
 			const size_t newCapacity = m_Capacity > 0 ? factor * m_Capacity : 1;
-			Buffer newBuffer(newCapacity * m_ComponentMeta.Size, m_ComponentMeta.Alignment);
+			Buffer newBuffer(newCapacity * m_Meta.Size, m_Meta.Alignment);
 
 			switch (m_CopyType) {
 			case CopyType::Memcpy: {
 				void* dst = newBuffer.Data();
 				void* src = m_Buffer.Data();
-				memcpy(dst, src, m_Size * m_ComponentMeta.Size);
+				memcpy(dst, src, m_Size * m_Meta.Size);
 				break;
 			}
 			case CopyType::Move: {
@@ -297,8 +297,8 @@ namespace archestry {
 				for (size_t i = 0; i < size; i++) {
 					void* dst = newBuffer[ByteOffset(i)];
 					void* src = m_Buffer[ByteOffset(i)];
-					m_ComponentMeta.MoveConstruct(dst, src);
-					m_ComponentMeta.Destruct(src);
+					m_Meta.MoveConstruct(dst, src);
+					m_Meta.Destruct(src);
 				}
 				break;
 			}
@@ -318,9 +318,9 @@ namespace archestry {
 		ComponentPool() = delete;
 
 		ComponentPool(ComponentMeta meta, size_t capacity) :
-			m_ComponentMeta(meta),
-			m_CopyType(m_ComponentMeta.IsTriviallyCopyable ? CopyType::Memcpy : CopyType::Move),
-			m_Buffer(capacity* m_ComponentMeta.Size, m_ComponentMeta.Alignment),
+			m_Meta(meta),
+			m_CopyType(m_Meta.IsTriviallyCopyable ? CopyType::Memcpy : CopyType::Move),
+			m_Buffer(capacity* m_Meta.Size, m_Meta.Alignment),
 			m_Capacity(capacity),
 			m_Size(0) {
 			// ASSERT valid componentInfo
@@ -334,7 +334,7 @@ namespace archestry {
 			if (m_CopyType == CopyType::Move)
 				for (size_t i = 0; i < m_Size; i++) {
 					void* toDestroy = m_Buffer[ByteOffset(i)];
-					m_ComponentMeta.Destruct(toDestroy);
+					m_Meta.Destruct(toDestroy);
 				}
 		}
 
@@ -358,10 +358,10 @@ namespace archestry {
 
 			switch (m_CopyType) {
 			case CopyType::Memcpy:
-				memcpy(dst, component, m_ComponentMeta.Size);
+				memcpy(dst, component, m_Meta.Size);
 				break;
 			case CopyType::Move:
-				m_ComponentMeta.MoveConstruct(dst, component);
+				m_Meta.MoveConstruct(dst, component);
 				break;
 			default:
 				ARCH_ASSERT(false, "Unsupported copy type");
@@ -380,8 +380,8 @@ namespace archestry {
 				* to maintain continuous and tightly packed memory
 				*/
 				Replace(index, m_Size - 1);
-			else if (!m_ComponentMeta.IsTriviallyCopyable)
-				m_ComponentMeta.Destruct(m_Buffer[(m_Size - 1) * m_ComponentMeta.Size]);
+			else if (!m_Meta.IsTriviallyCopyable)
+				m_Meta.Destruct(m_Buffer[(m_Size - 1) * m_Meta.Size]);
 
 			m_Size--;
 		}
