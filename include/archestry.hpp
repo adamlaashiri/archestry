@@ -6,6 +6,7 @@
 #include <cstdlib>
 #endif
 
+#include <iostream>
 #include <stdint.h>
 #include <bit>
 #include <memory>
@@ -524,31 +525,48 @@ namespace archestry {
 		}
 
 		template<typename ...Components, typename Fn>
-		void ForEach(Fn&& fn) {
+		bool ForEach(Fn&& fn) {
 			AssertSyncedPools();
 
-			auto typedPools = std::make_tuple(GetPool<Components>().GetBase<Components>()...);
+			auto pools = std::make_tuple(GetPool<Components>().GetBase<Components>()...);
 
-			std::apply([&](auto... ptrs) {
+			// Iterates through all components, unless a bool returning callable breaks the loop.
+			return std::apply([&](auto... ptrs) {
 
-				// This branch is for [](EntityID ID, Component& c1, Component& c2...);
-				if constexpr (std::is_invocable_v<Fn&&, EntityID, Components&...>) {
-					EntityID* indexToEntity = m_IndexToEntity.data();
+				// Compile time branches.
 
-					for (size_t i = 0; i < m_Size; i++)
-						fn(indexToEntity[i], ptrs[i]...);
+				// Branches for [](EntityID ID, Component& c1, Component& c2...);
+				if constexpr (std::is_invocable_r_v<bool, Fn&&, EntityID, Components&...>) {
+					// Bool returning callable can break the loop.
+					for (size_t i = 0; i < m_Size; i++) 
+						if (!fn(m_IndexToEntity[i], ptrs[i]...)) return false;
 				}
-				// This branch is for [](Component& c1, Component& c2...);
+				else if constexpr (std::is_invocable_v<Fn&&, EntityID, Components&...>) {
+					for (size_t i = 0; i < m_Size; i++) 
+						fn(m_IndexToEntity[i], ptrs[i]...);
+				}
+
+				// Branches for [](Component& c1, Component& c2...);
+				else if constexpr (std::is_invocable_r_v<bool, Fn&&, Components&...>){
+					// Bool returning callable can break the loop.
+					for (size_t i = 0; i < m_Size; i++) 
+						if (!fn(ptrs[i]...)) return false;
+				}
 				else if constexpr (std::is_invocable_v<Fn&&, Components&...>) {
-					for (size_t i = 0; i < m_Size; i++)
+					for (size_t i = 0; i < m_Size; i++) 
 						fn(ptrs[i]...);
 				}
-				else
-					ARCH_ASSERT(false,
-						"ForEach() parameter pack does not match lambda args."
-					);
 
-				}, typedPools);
+				else {
+					ARCH_ASSERT(false,
+						"ForEach() parameter pack and lambda args mismatch."
+					);
+				}
+
+				return true;
+
+				}, pools);
+
 		}
 
 		/*
@@ -817,9 +835,7 @@ namespace archestry {
 	class Query {
 	private:
 		Registry* m_Registry = nullptr;
-
 		Bitmask m_IncludedMask = 0;
-
 		Bitmask m_ExcludedMask = 0;
 
 		bool IsTarget(Bitmask mask) const {
@@ -880,7 +896,8 @@ namespace archestry {
 				if (!IsTarget(mask))
 					continue;
 
-				archetype.ForEach<Components...>(std::forward<Fn>(fn));
+				// Keep looping unless the callable (Fn) returns false.
+				if (!archetype.ForEach<Components...>(std::forward<Fn>(fn))) break;
 			}
 		}
 	};
