@@ -6,7 +6,6 @@
 #include <cstdlib>
 #endif
 
-#include <iostream>
 #include <stdint.h>
 #include <bit>
 #include <memory>
@@ -719,7 +718,7 @@ namespace archestry {
 		}
 
 		template<typename... Components>
-		std::tuple<Components&...> AddComponents(EntityID ID, Components&&... components) {
+		std::tuple<Components&...> AddComponents(EntityID ID, Components... components) {
 			AssertValidEntity(ID);
 			ARCH_ASSERT(!HasAnyComponent<Components...>(ID),
 				"Entity already has atleast one of the specified components.");
@@ -733,7 +732,7 @@ namespace archestry {
 				DestroyArchetypeIfEmpty(*entity.Archetype);
 			}
 
-			auto addedComponents = newArch.AddMultiple<Components...>(ID, std::forward<Components>(components)...);
+			auto addedComponents = newArch.AddMultiple<Components...>(ID, std::move(components)...);
 
 			entity.Mask |= componentMask;
 			entity.Archetype = &newArch;
