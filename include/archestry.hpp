@@ -69,6 +69,7 @@ namespace archestry {
 	class ComponentRegistry;
 	class Archetype;
 
+	using EntityView = std::vector<EntityID>;
 
 	struct EntityMeta {
 		Bitmask Mask = ACTIVE_ENTITY;
@@ -401,6 +402,7 @@ namespace archestry {
 		}
 	};
 
+
 	// Groups entities with the same set of components together.
 		// Invariants:
 		// - Registry outlives Archetype.
@@ -571,7 +573,6 @@ namespace archestry {
 		/*
 		* Used in a type erased context.
 		* Move every relevant component of entity to other archetype.
-		* TODO: Move this responsibility to orchestrator.
 		*/
 		void Move(EntityID ID, Archetype& other) {
 			AssertSyncedPools();
@@ -690,6 +691,20 @@ namespace archestry {
 			}
 			entity = { .Mask = INACTIVE_ENTITY };
 			m_IDCache.push_back(ID);
+		}
+
+		bool IsValidEntity(EntityID ID) const {
+			if (ID >= m_Entities.size()) return false;
+			if (m_Entities[ID].Mask == INACTIVE_ENTITY) return false;
+			return true;
+		}
+
+		const EntityView GetEntities() {
+			EntityView view;
+			view.reserve(GetEntityCount());
+			for (EntityID ID = 0; ID < m_Entities.size(); ID++)
+				if (m_Entities[ID].Mask & ACTIVE_ENTITY) view.push_back(ID);
+			return view;
 		}
 
 		template<typename Component, typename... Args>
@@ -869,10 +884,26 @@ namespace archestry {
 
 		bool HasEntity(EntityID ID) const {
 			AssertValidRegistry();
-			m_Registry->AssertValidEntity(ID);
 
 			return m_Registry->HasAllComponents<Components...>(ID) &&
 				((m_Registry->m_Entities[ID].Mask & m_ExcludedMask) == 0);
+		}
+
+		const EntityView GetEntities() {
+			AssertValidRegistry();
+			EntityView view;
+			
+			size_t capacity = 0;
+			for (auto& [mask, archetype] : m_Registry->m_Types) {
+				if (!IsTarget(mask))
+					continue;
+				capacity += archetype.GetSize();
+			}
+			view.reserve(capacity);
+
+			for (EntityID ID = 0; ID < m_Registry->m_Entities.size(); ID++)
+				if (IsTarget(m_Registry->m_Entities[ID].Mask)) view.push_back(ID);
+			return view;
 		}
 
 		std::optional<std::tuple<Components&...>> GetFirst() {
@@ -898,6 +929,25 @@ namespace archestry {
 				// Keep looping unless the callable (Fn) returns false.
 				if (!archetype.ForEach<Components...>(std::forward<Fn>(fn))) break;
 			}
+		}
+		
+		// Prefer ForEach as it is significantly faster.
+		std::vector<std::tuple<Components&...>> GetPacked() {
+			AssertValidRegistry();
+
+			std::vector<std::tuple<Components&...>> packed;
+
+			size_t capacity = 0;
+			for (auto& [mask, archetype] : m_Registry->m_Types) {
+				if (!IsTarget(mask))
+					continue;
+				capacity += archetype.GetSize();
+			}
+			packed.reserve(capacity);
+
+			ForEach([&](Components&... components) { packed.push_back({components...}); });
+
+			return packed;
 		}
 	};
 
